@@ -24,6 +24,32 @@ type ExampleReply struct {
 
 // Add your RPC definitions here.
 
+// worker发送请求至master
+type WorkArgs struct {
+	// 请求类型，10表示申请任务，1表示完成map，2表示完成reduce
+	AType int
+	// map完成任务的文件列表
+	MapFiles []string
+	// 完成任务的编号
+	WorkId int
+}
+
+// master回应worker
+type WorkReply struct {
+	// 任务类型，10表示继续等待，1表示map，2表示reduce，3表示所有任务已经完成
+	AType int
+	// 任务编号
+	WorkId int
+	// map编号
+	MapId int
+
+	// map输入文件
+	MapFile string
+	// reduce输入文件
+	ReduceFiles []string
+
+	NReduce int
+}
 
 // Cook up a unique-ish UNIX-domain socket name
 // in /var/tmp, for the coordinator.

@@ -1,10 +1,17 @@
 package mr
 
-import "fmt"
+import (
+	"encoding/json"
+	"fmt"
+	"io"
+	"io/ioutil"
+	"os"
+	"strconv"
+	"time"
+)
 import "log"
 import "net/rpc"
 import "hash/fnv"
-
 
 //
 // Map functions return a slice of KeyValue.
@@ -24,14 +31,136 @@ func ihash(key string) int {
 	return int(h.Sum32() & 0x7fffffff)
 }
 
-
 //
 // main/mrworker.go calls this function.
 //
+func mapWorker(mapf func(string, string) []KeyValue, fileName string, id int, nReduce int) []string {
+	print("执行Map任务" + strconv.Itoa(id) + "\n")
+
+	fileData, err := ioutil.ReadFile(fileName)
+	if err != nil {
+		panic(err.Error())
+	}
+	data := mapf(fileName, string(fileData))
+	ans := make([]string, 0)
+	file := make([]*os.File, 0)
+	encs := make([]*json.Encoder, 0)
+
+	for i := 0; i < nReduce; i++ {
+		name := "mr-" + strconv.Itoa(id) + "-" + strconv.Itoa(i)
+		create, err := os.OpenFile(name, os.O_WRONLY|os.O_CREATE, 0666)
+		if err != nil {
+			return nil
+		}
+		file = append(file, create)
+		ans = append(ans, name)
+		encs = append(encs, json.NewEncoder(create))
+	}
+
+	for _, kv := range data {
+		idx := ihash(kv.Key) % nReduce
+		err := encs[idx].Encode(kv)
+		if err != nil {
+			panic(err.Error())
+		}
+	}
+
+	for i := 0; i < nReduce; i++ {
+		err := file[i].Close()
+		if err != nil {
+			panic(err.Error())
+		}
+	}
+
+	return ans
+}
+
+func reduceWorker(reducef func(string, []string) string, files []string, reduceId int) {
+
+	print("执行Reduce任务" + strconv.Itoa(reduceId) + "\n")
+
+	fileName := "mr-out-" + strconv.Itoa(reduceId)
+
+	// 读取分区内所有文件
+	mp := make(map[string][]string)
+	for _, filePath := range files {
+		f, err := os.OpenFile(filePath, os.O_RDONLY, 0666)
+		if err != nil {
+			panic(err.Error())
+		}
+		dec := json.NewDecoder(f)
+		for {
+			var kv KeyValue
+			if err := dec.Decode(&kv); err != nil {
+				break
+			}
+			mp[kv.Key] = append(mp[kv.Key], kv.Value)
+		}
+	}
+
+	// 计算并写入文件
+	f, err := os.Create(fileName)
+	if err != nil {
+		panic(err.Error())
+	}
+	for key, val := range mp {
+		res := reducef(key, val)
+		_, err = io.WriteString(f, key+" "+res+"\n")
+		if err != nil {
+			panic(err.Error())
+		}
+	}
+
+}
+
 func Worker(mapf func(string, string) []KeyValue,
 	reducef func(string, []string) string) {
 
 	// Your worker implementation here.
+
+	args := WorkArgs{
+		AType: 10,
+	}
+	reply := WorkReply{}
+
+	for true {
+		// 发送请求
+		for true {
+			ok := call("Coordinator.Worker", &args, &reply)
+			if ok {
+				if reply.AType == 3 {
+					return
+				}
+
+				if reply.AType != 10 {
+					print("收到请求：", reply.WorkId, "\n\n")
+					break
+				}
+
+			} else {
+				fmt.Printf("call failed!\n")
+			}
+			print("worker重试\n\n")
+			time.Sleep(time.Second * 5)
+		}
+
+		startTime := time.Now().Unix()
+
+		// map任务
+		if reply.AType == 1 {
+			args.AType = 1
+			args.WorkId = reply.WorkId
+			args.MapFiles = mapWorker(mapf, reply.MapFile, reply.MapId, reply.NReduce)
+		} else {
+			args.AType = 2
+			args.WorkId = reply.WorkId - 1
+			print("reduce接收", reply.WorkId, "\n")
+			reduceWorker(reducef, reply.ReduceFiles, reply.WorkId)
+		}
+
+		endTime := time.Now().Unix()
+		print("任务完成，执行用时：", endTime-startTime, "s\n\n")
+	}
 
 	// uncomment to send the Example RPC to the coordinator.
 	// CallExample()
