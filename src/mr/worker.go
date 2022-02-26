@@ -35,7 +35,7 @@ func ihash(key string) int {
 // main/mrworker.go calls this function.
 //
 func mapWorker(mapf func(string, string) []KeyValue, fileName string, id int, nReduce int) []string {
-	print("执行Map任务" + strconv.Itoa(id) + "\n")
+	//print("执行Map任务" + strconv.Itoa(id) + "\n")
 
 	fileData, err := ioutil.ReadFile(fileName)
 	if err != nil {
@@ -75,11 +75,11 @@ func mapWorker(mapf func(string, string) []KeyValue, fileName string, id int, nR
 	return ans
 }
 
-func reduceWorker(reducef func(string, []string) string, files []string, reduceId int) {
+func reduceWorker(reducef func(string, []string) string, files []string, reduceId int, id int) string {
 
-	print("执行Reduce任务" + strconv.Itoa(reduceId) + "\n")
+	//print("执行Reduce任务" + strconv.Itoa(reduceId) + "\n")
 
-	fileName := "mr-out-" + strconv.Itoa(reduceId)
+	fileName := "mr-out-" + strconv.Itoa(reduceId) + "-" + strconv.Itoa(id)
 
 	// 读取分区内所有文件
 	mp := make(map[string][]string)
@@ -111,6 +111,7 @@ func reduceWorker(reducef func(string, []string) string, files []string, reduceI
 		}
 	}
 
+	return fileName
 }
 
 func Worker(mapf func(string, string) []KeyValue,
@@ -133,29 +134,30 @@ func Worker(mapf func(string, string) []KeyValue,
 				}
 
 				if reply.AType != 10 {
-					print("收到请求：", reply.WorkId, "\n\n")
+					//print("收到请求：", reply.WorkId, "\n\n")
 					break
 				}
 
 			} else {
 				fmt.Printf("call failed!\n")
 			}
-			print("worker重试\n\n")
+			//print("worker重试\n\n")
 			time.Sleep(time.Second * 5)
 		}
 
 		startTime := time.Now().Unix()
-
+		print(reply.Id, "\n\n")
 		// map任务
 		if reply.AType == 1 {
 			args.AType = 1
 			args.WorkId = reply.WorkId
-			args.MapFiles = mapWorker(mapf, reply.MapFile, reply.MapId, reply.NReduce)
+			args.MapFiles = mapWorker(mapf, reply.MapFile, reply.Id, reply.NReduce)
 		} else {
 			args.AType = 2
 			args.WorkId = reply.WorkId - 1
-			print("reduce接收", reply.WorkId, "\n")
-			reduceWorker(reducef, reply.ReduceFiles, reply.WorkId)
+
+			//print("reduce接收", reply.WorkId, "\n")
+			args.ReduceFile = reduceWorker(reducef, reply.ReduceFiles, reply.WorkId-1, reply.Id)
 		}
 
 		endTime := time.Now().Unix()

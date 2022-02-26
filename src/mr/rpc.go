@@ -30,6 +30,8 @@ type WorkArgs struct {
 	AType int
 	// map完成任务的文件列表
 	MapFiles []string
+	// reduce的中间目录
+	ReduceFile string
 	// 完成任务的编号
 	WorkId int
 }
@@ -40,8 +42,9 @@ type WorkReply struct {
 	AType int
 	// 任务编号
 	WorkId int
-	// map编号
-	MapId int
+
+	// 任务编号
+	Id int
 
 	// map输入文件
 	MapFile string

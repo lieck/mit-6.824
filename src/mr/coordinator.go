@@ -2,6 +2,7 @@ package mr
 
 import (
 	"log"
+	"strconv"
 	"sync"
 	"time"
 )
@@ -15,16 +16,17 @@ type Coordinator struct {
 	nReduce int
 	nMap    int
 
+	id int
 	//map任务
-	mapId     int
 	statusMap []int
 	timeMap   []int64
 	mapFiles  []string
 
 	//reduce任务
-	statusReduce []int
-	timeReduce   []int64
-	reduceFiles  [][]string
+	statusReduce   []int
+	timeReduce     []int64
+	reduceFiles    [][]string
+	ansReduceFiles []string
 
 	status int
 
@@ -33,35 +35,24 @@ type Coordinator struct {
 
 // Your code here -- RPC handlers for the worker to call.
 
-func (c *Coordinator) monitorFunc() {
-
-	print("===========================================================\n\n")
-	print("map运行状态\n")
-	for i := 0; i < c.nMap; i++ {
-		print(c.statusMap[i], "\t")
-	}
-	print("\n\n")
-
-	print("===========================================================\n\n")
-	time.Sleep(time.Second * 15)
-}
-
 func (c *Coordinator) Worker(args *WorkArgs, reply *WorkReply) error {
 
 	c.lock.Lock()
 
 	// 任务完成
-	if args.AType == 1 {
+	if args.AType == 1 && c.statusMap[args.WorkId] == 1 {
 		c.statusMap[args.WorkId] = 2
 		for i := 0; i < c.nReduce; i++ {
 			c.reduceFiles[i] = append(c.reduceFiles[i], args.MapFiles[i])
 		}
 	} else if args.AType == 2 {
 		c.statusReduce[args.WorkId] = 2
+		c.ansReduceFiles[args.WorkId] = args.ReduceFile
 	}
 
 	// 申请任务
 	currTime := time.Now().Unix()
+
 	if c.status == 0 {
 		workId := -1
 
@@ -76,8 +67,7 @@ func (c *Coordinator) Worker(args *WorkArgs, reply *WorkReply) error {
 		for i := 0; i < c.nMap && workId == -1; i++ {
 			if c.statusMap[i] == 1 {
 				nextStatus = false
-				if c.timeMap[i]-currTime > 30 {
-					print("超时重试:", workId, "\n\n")
+				if currTime-c.timeMap[i] > 10 {
 					workId = i
 					break
 				}
@@ -88,10 +78,10 @@ func (c *Coordinator) Worker(args *WorkArgs, reply *WorkReply) error {
 			reply.WorkId = workId
 			reply.AType = 1
 			reply.MapFile = c.mapFiles[workId]
-			reply.MapId = c.mapId
+			reply.Id = c.id
 			reply.NReduce = c.nReduce
 
-			c.mapId += 1
+			c.id += 1
 
 			c.statusMap[workId] = 1
 			c.timeMap[workId] = currTime
@@ -116,9 +106,7 @@ func (c *Coordinator) Worker(args *WorkArgs, reply *WorkReply) error {
 		for i := 0; i < c.nReduce && workId == -1; i++ {
 			if c.statusReduce[i] == 1 {
 				nextStatus = false
-				print("reduce任务", i, ", 已运行", currTime-c.timeReduce[i], "s\n\n")
-				if currTime-c.timeReduce[i] > 5 {
-					print("reduce超时重试：", i, "\n\n")
+				if currTime-c.timeReduce[i] > 10 {
 					workId = i
 					break
 				}
@@ -129,6 +117,8 @@ func (c *Coordinator) Worker(args *WorkArgs, reply *WorkReply) error {
 			reply.AType = 2
 			reply.WorkId = workId + 1
 			reply.ReduceFiles = c.reduceFiles[workId]
+			reply.Id = c.id
+			c.id += 1
 
 			c.timeReduce[workId] = currTime
 			c.statusReduce[workId] = 1
@@ -139,6 +129,18 @@ func (c *Coordinator) Worker(args *WorkArgs, reply *WorkReply) error {
 			reply.AType = 10
 		}
 	}
+	print(c.id, "\n")
+	print("map状态：\n")
+	for i := 0; i < c.nMap; i++ {
+		print(c.statusMap[i], "\t")
+	}
+	print("\n")
+	print("reduce状态：\n")
+	for i := 0; i < c.nReduce; i++ {
+		print(c.statusReduce[i], "\t")
+	}
+	print("\n\n")
+
 	c.lock.Unlock()
 
 	return nil
@@ -179,10 +181,15 @@ func (c *Coordinator) Done() bool {
 	c.lock.Lock()
 	// Your code here.
 	ret = c.status == 2
-	c.lock.Unlock()
 	if ret {
-		print("完成计算\n")
+		for i := 0; i < c.nReduce; i++ {
+			err := os.Rename(c.ansReduceFiles[i], "mr-out-"+strconv.Itoa(i))
+			if err != nil {
+				panic(err.Error())
+			}
+		}
 	}
+	c.lock.Unlock()
 	return ret
 }
 
@@ -208,7 +215,9 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 
 	c.reduceFiles = make([][]string, nReduce)
 
-	c.mapId = 0
+	c.ansReduceFiles = make([]string, nReduce)
+
+	c.id = 1
 
 	c.server()
 	return &c
