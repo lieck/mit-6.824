@@ -84,6 +84,7 @@ type Raft struct {
 	votesNum     int   // 投票数量
 	rpcNum       int   // rpc响应的server数量
 	serverNum    int   // 集群服务器数量
+	requestTime  int64 // 上次收到请求的时间
 
 	lastLogIndex int
 
@@ -96,6 +97,8 @@ type Raft struct {
 
 	nextIndex  []int
 	matchIndex []int
+
+	appliedStep int // 日志收敛
 }
 
 // GetState return currentTerm and whether this server
@@ -205,11 +208,20 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	reply.VoteGranted = false
 	reply.Term = rf.currentTerm
 
-	dPrint(2, rf.me, " 收到投票请求", args.CandidateId)
-
 	if args.Term < rf.currentTerm || (rf.votedFor != -1 && args.Term == rf.currentTerm) {
 		return
 	}
+	rf.currentTerm = args.Term
+
+	//dPrint(3, rf.me, " 收到投票请求", args.CandidateId)
+	//currTime := time.Now().UnixNano() / 1e6
+	//if currTime - rf.requestTime < 500 {
+	//	return
+	//}
+
+	//if rf.lastLogIndex == 0 && args.LastLogTerm > 0 {
+	//	return
+	//}
 
 	if rf.lastLogIndex > 0 {
 		if rf.logs[rf.lastLogIndex].Term > args.Term {
@@ -219,12 +231,11 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		}
 	}
 
-	dPrint(2, rf.me, " 投票给", args.CandidateId)
+	//dPrint(2, rf.me, " 投票给", args.CandidateId)
 
 	reply.VoteGranted = true
 	rf.serverType = 3
 	rf.votedFor = args.CandidateId
-	rf.currentTerm = args.Term
 }
 
 type AppendEntriesArgs struct {
@@ -245,7 +256,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
-	dPrint(2, rf.me, " 收到 ", args.LeaderId, " 的心跳请求")
+	dPrint(3, rf.me, " 收到 ", args.LeaderId, " 的心跳请求\t", rf.currentTerm)
 
 	reply.Term = rf.currentTerm
 	if args.Term < rf.currentTerm {
@@ -253,60 +264,58 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	} else if args.Term > rf.currentTerm {
 		rf.currentTerm = args.Term
 	}
-
+	rf.requestTime = time.Now().UnixNano() / 1e6
 	rf.electionTime = newElectionTime()
 	rf.serverType = 3
 
 	// 接收日志
-	if rf.lastLogIndex < args.PrevLogIndex ||
-		rf.logs[args.PrevLogIndex].Term != args.PrevLogTerm {
-		reply.Success = false
-		if rf.lastLogIndex > 0 {
-			rf.lastLogIndex -= 1
-		}
+	reply.Success = false
+	if rf.lastLogIndex < args.PrevLogIndex {
 		return
 	}
-	reply.Success = true
+	if rf.logs[args.PrevLogIndex].Term != args.PrevLogTerm {
+		rf.logs = rf.logs[0:args.PrevLogIndex]
+		rf.lastLogIndex = len(rf.logs) - 1
+		return
+	}
 
-	for idx := rf.lastApplied + 1; idx < rf.lastLogIndex; idx++ {
+	reply.Success = true
+	if rf.lastLogIndex > args.PrevLogIndex {
+		rf.logs = rf.logs[0 : args.PrevLogIndex+1]
+		rf.lastLogIndex = len(rf.logs) - 1
+	}
+	for idx := rf.lastApplied + 1; idx <= rf.lastLogIndex; idx++ {
 		if args.LeaderCommit >= idx {
+			dPrint(3, rf.me, "\t应用日志", idx, "\t", rf.logs[idx].Command, "\t", rf.logs[idx].Term)
 			rf.applyCh <- ApplyMsg{
 				CommandValid: true,
-				Command:      rf.logs[idx],
+				Command:      rf.logs[idx].Command,
 				CommandIndex: idx,
 			}
 			rf.lastApplied += 1
 		}
 	}
+	if rf.commitIndex < rf.lastApplied {
+		rf.commitIndex = rf.lastApplied
+	}
 
 	if args.Entries != nil {
-		logIdx := args.PrevLogIndex + 1
-		entIdx := 0
-		for entIdx < len(args.Entries) {
-			if len(rf.logs) > logIdx {
-				rf.logs[logIdx] = args.Entries[entIdx]
-			} else {
-				rf.logs = append(rf.logs, args.Entries[entIdx])
-			}
-			if logIdx <= args.LeaderCommit {
+		dPrint(3, rf.me, " 收到日志")
+
+		for entIdx := 0; entIdx < len(args.Entries); entIdx++ {
+			rf.logs = append(rf.logs, args.Entries[entIdx])
+			rf.lastLogIndex = len(rf.logs) - 1
+			if rf.lastLogIndex <= args.LeaderCommit {
+				dPrint(3, rf.me, "\tc应用日志", entIdx, "\t", args.Entries[entIdx].Command)
 				rf.applyCh <- ApplyMsg{
 					CommandValid: true,
 					Command:      args.Entries[entIdx].Command,
-					CommandIndex: logIdx,
+					CommandIndex: rf.lastLogIndex,
 				}
+				rf.lastApplied = rf.lastLogIndex
 			}
-			logIdx += 1
-			entIdx += 1
 		}
-
-		rf.lastLogIndex = logIdx - 1
-		if args.LeaderCommit < logIdx {
-			rf.commitIndex = args.LeaderCommit
-			rf.lastApplied = args.LeaderCommit
-		} else {
-			rf.commitIndex = logIdx - 1
-			rf.lastApplied = logIdx - 1
-		}
+		rf.lastLogIndex = len(rf.logs) - 1
 	}
 }
 
@@ -372,9 +381,10 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 			Term:    term,
 			Command: command,
 		})
-		rf.lastLogIndex += 1
+		rf.lastLogIndex = len(rf.logs) - 1
+		index = rf.lastLogIndex
+		dPrint(3, rf.me, " client entry:", rf.lastLogIndex, "\t", command, "\t", term)
 	}
-	dPrint(2, rf.me, " client entry:", rf.lastLogIndex)
 	rf.mu.Unlock()
 	return index, term, isLeader
 }
@@ -394,7 +404,8 @@ func (rf *Raft) Kill() {
 	atomic.StoreInt32(&rf.dead, 1)
 	// Your code here, if desired.
 	rf.mu.Lock()
-	dPrint(2, rf.me, "\ttype:", rf.serverType, "\tterm:", rf.currentTerm)
+	dPrint(3, rf.me, "\ttype:", rf.serverType, "\tterm:", rf.currentTerm)
+	dPrint(3, rf.me, "\tlastLogIndex:", rf.lastLogIndex)
 	rf.mu.Unlock()
 }
 
@@ -434,7 +445,7 @@ func (rf *Raft) ticker() {
 		rf.votedFor = rf.me
 		rf.mu.Unlock()
 
-		dPrint(2, rf.me, " 开始选举")
+		dPrint(3, rf.me, " 开始选举")
 
 		for idx := range rf.peers {
 			if idx == rf.me {
@@ -443,21 +454,9 @@ func (rf *Raft) ticker() {
 			go rf.rpcTicker(idx)
 		}
 
-		// 等待rpc结束
-		for {
-			rf.mu.Lock()
-			isRpc := rf.rpcNum == rf.serverNum-1
-			isRpc = isRpc || rf.votesNum >= rf.serverNum/2
-			rf.mu.Unlock()
-
-			if !isRpc {
-				rf.muTicker.Lock()
-				rf.condTicker.Wait()
-				rf.muTicker.Unlock()
-			} else {
-				break
-			}
-		}
+		rf.muTicker.Lock()
+		rf.condTicker.Wait()
+		rf.muTicker.Unlock()
 
 		rf.mu.Lock()
 		rf.electionTime = newElectionTime()
@@ -465,6 +464,7 @@ func (rf *Raft) ticker() {
 			dPrint(2, rf.me, " 选举完成\t", rf.votesNum >= rf.serverNum/2)
 			if rf.votesNum >= rf.serverNum/2 {
 				// 选举成功
+				dPrint(3, rf.me, " 获取leader")
 				rf.serverType = 1
 				rf.votedFor = rf.me
 				for i := 0; i < rf.serverNum; i++ {
@@ -488,10 +488,9 @@ func (rf *Raft) rpcTicker(idx int) {
 	rf.mu.Lock()
 	args.CandidateId = rf.me
 	args.Term = rf.currentTerm
-	lastLogIndex := len(rf.logs) - 1
-	args.LastLogIndex = lastLogIndex
-	if lastLogIndex != 0 {
-		args.LastLogTerm = rf.logs[lastLogIndex].Term
+	args.LastLogIndex = rf.lastLogIndex
+	if rf.lastLogIndex != 0 {
+		args.LastLogTerm = rf.logs[rf.lastLogIndex].Term
 	}
 	rf.mu.Unlock()
 
@@ -509,16 +508,19 @@ func (rf *Raft) rpcTicker(idx int) {
 
 	rf.mu.Lock()
 	rf.electionTime = newElectionTime()
-	rf.rpcNum += 1
+	rf.rpcNum -= 1
+	if rf.rpcNum <= 0 {
+		// rf.votesNum >= rf.serverNum/2
+		rf.condTicker.Broadcast()
+	}
 	rf.mu.Unlock()
-	rf.condTicker.Broadcast()
 }
 
 func (rf *Raft) heartbeat() {
 
 	for rf.killed() == false {
 		rf.mu.Lock()
-		rf.rpcNum = 0
+		rf.rpcNum = rf.serverNum - 1
 		rf.mu.Unlock()
 
 		for {
@@ -535,7 +537,7 @@ func (rf *Raft) heartbeat() {
 			}
 		}
 
-		dPrint(2, rf.me, " 心跳")
+		dPrint(3, rf.me, " 心跳")
 		for idx := range rf.peers {
 			if idx == rf.me {
 				continue
@@ -544,26 +546,16 @@ func (rf *Raft) heartbeat() {
 		}
 
 		// 等待rpc结束
-		for {
-			rf.mu.Lock()
-			isRpc := rf.rpcNum == rf.serverNum-1
-			rf.mu.Unlock()
-
-			if !isRpc {
-				rf.muHeartbeat.Lock()
-				rf.condHeartbeat.Wait()
-				rf.muHeartbeat.Unlock()
-			} else {
-				break
-			}
-		}
+		//rf.muHeartbeat.Lock()
+		//rf.condHeartbeat.Wait()
+		//rf.muHeartbeat.Unlock()
 
 		time.Sleep(time.Millisecond * 120)
 
 		rf.mu.Lock()
 		if rf.serverType == 1 {
 			cnt := 0
-			noCommit := rf.commitIndex + 1
+			noCommit := rf.commitIndex + rf.appliedStep
 			for i := 0; i < rf.serverNum; i++ {
 				if i == rf.me {
 					continue
@@ -575,14 +567,19 @@ func (rf *Raft) heartbeat() {
 
 			if cnt >= rf.serverNum/2 {
 				rf.commitIndex = noCommit
-				for i := rf.lastApplied; i < rf.commitIndex; i++ {
+				for i := rf.lastApplied + 1; i <= rf.commitIndex; i++ {
+					dPrint(3, rf.me, "\t应用日志", i, "\t", rf.logs[i].Command)
 					rf.applyCh <- ApplyMsg{
 						CommandValid: true,
 						Command:      rf.logs[i].Command,
 						CommandIndex: i,
 					}
-					rf.lastApplied += 1
 				}
+				if rf.appliedStep < 10 {
+					rf.appliedStep += 3
+				}
+			} else {
+				rf.appliedStep = 1
 			}
 		}
 		rf.mu.Unlock()
@@ -597,16 +594,18 @@ func (rf *Raft) rpcHeartbeat(server int) {
 	args.LeaderId = rf.me
 	args.Term = rf.currentTerm
 	args.Entries = nil
+	args.LeaderCommit = rf.commitIndex
 
 	start := rf.nextIndex[server]
-	end := start + 10
+	end := start + 20
 	if end > rf.lastLogIndex {
 		end = rf.lastLogIndex
 	}
 
 	if rf.lastLogIndex > 0 {
-		if start < rf.lastLogIndex {
-			args.Entries = rf.logs[start:end]
+		if start <= rf.lastLogIndex {
+			//dPrint(3, rf.me, " 发送log至", server, " [", start, ",", end, "]")
+			args.Entries = rf.logs[start : end+1]
 		}
 		args.PrevLogIndex = start - 1
 		args.PrevLogTerm = rf.logs[start-1].Term
@@ -630,10 +629,13 @@ func (rf *Raft) rpcHeartbeat(server int) {
 		rf.mu.Unlock()
 	}
 
-	rf.mu.Lock()
-	rf.rpcNum += 1
-	rf.mu.Unlock()
-	rf.condHeartbeat.Broadcast()
+	//rf.mu.Lock()
+	//rf.rpcNum -= 1
+	//if rf.rpcNum <= 0 {
+	//	rf.condHeartbeat.Broadcast()
+	//	dPrint(3, rf.me, " 心跳结束")
+	//}
+	//rf.mu.Unlock()
 }
 
 // Make the service or tester wants to create a Raft server. the ports
@@ -670,6 +672,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.matchIndex = make([]int, rf.serverNum)
 	rf.commitIndex = 0
 	rf.lastApplied = 0
+	rf.lastLogIndex = 0
 
 	dPrint(1, rf.me, " server num:", rf.serverNum)
 
@@ -681,6 +684,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	go rf.heartbeat()
 
+	//print("\n\n\n\n")
+
 	return rf
 }
 
@@ -690,8 +695,12 @@ func newElectionTime() int64 {
 }
 
 func dPrint(t int, a ...interface{}) {
-	debugType := 2
+	debugType := 31
 	if t == debugType {
+		//currTime := time.Now()
+		//print(currTime.Hour(), ":", currTime.Minute(), ":", currTime.Second(), "-")
+		//print(currTime.Nanosecond() / 1e9, ' ')
+		//log.Print(time.Now().UnixNano() / 1e6)
 		log.Print(a...)
 	}
 	return
