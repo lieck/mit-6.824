@@ -224,9 +224,10 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	//}
 
 	if rf.lastLogIndex > 0 {
-		if rf.logs[rf.lastLogIndex].Term > args.Term {
+		if rf.logs[rf.lastLogIndex].Term > args.LastLogTerm {
 			return
-		} else if rf.logs[rf.lastLogIndex].Term == args.Term && rf.lastLogIndex > args.LastLogIndex {
+		}
+		if rf.logs[rf.lastLogIndex].Term == args.LastLogTerm && rf.lastLogIndex > args.LastLogIndex {
 			return
 		}
 	}
@@ -256,7 +257,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
-	dPrint(3, rf.me, " 收到 ", args.LeaderId, " 的心跳请求\t", rf.currentTerm)
+	//dPrint(3, rf.me, " 收到 ", args.LeaderId, " 的心跳请求\t", rf.currentTerm)
 
 	reply.Term = rf.currentTerm
 	if args.Term < rf.currentTerm {
@@ -273,6 +274,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if rf.lastLogIndex < args.PrevLogIndex {
 		return
 	}
+
 	if rf.logs[args.PrevLogIndex].Term != args.PrevLogTerm {
 		rf.logs = rf.logs[0:args.PrevLogIndex]
 		rf.lastLogIndex = len(rf.logs) - 1
@@ -284,9 +286,26 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.logs = rf.logs[0 : args.PrevLogIndex+1]
 		rf.lastLogIndex = len(rf.logs) - 1
 	}
-	for idx := rf.lastApplied + 1; idx <= rf.lastLogIndex; idx++ {
-		if args.LeaderCommit >= idx {
-			dPrint(3, rf.me, "\t应用日志", idx, "\t", rf.logs[idx].Command, "\t", rf.logs[idx].Term)
+
+	if args.Entries != nil {
+		for entIdx := 0; entIdx < len(args.Entries); entIdx++ {
+			rf.logs = append(rf.logs, args.Entries[entIdx])
+		}
+		dPrint(3, rf.me, "\t添加日志:[", args.PrevLogIndex+1, ",", len(rf.logs)-1, "]")
+	}
+	rf.lastLogIndex = len(rf.logs) - 1
+
+	if rf.lastLogIndex < args.LeaderCommit {
+		rf.commitIndex = rf.lastLogIndex
+	} else {
+		rf.commitIndex = args.LeaderCommit
+	}
+
+	// 应用状态机
+	if rf.logs[rf.commitIndex].Term == rf.currentTerm {
+
+		for idx := rf.lastApplied + 1; idx <= rf.commitIndex; idx++ {
+			dPrint(3, rf.me, "\t应用日志", idx, "\t", rf.logs[idx].Command)
 			rf.applyCh <- ApplyMsg{
 				CommandValid: true,
 				Command:      rf.logs[idx].Command,
@@ -294,28 +313,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			}
 			rf.lastApplied += 1
 		}
-	}
-	if rf.commitIndex < rf.lastApplied {
-		rf.commitIndex = rf.lastApplied
-	}
-
-	if args.Entries != nil {
-		dPrint(3, rf.me, " 收到日志")
-
-		for entIdx := 0; entIdx < len(args.Entries); entIdx++ {
-			rf.logs = append(rf.logs, args.Entries[entIdx])
-			rf.lastLogIndex = len(rf.logs) - 1
-			if rf.lastLogIndex <= args.LeaderCommit {
-				dPrint(3, rf.me, "\tc应用日志", entIdx, "\t", args.Entries[entIdx].Command)
-				rf.applyCh <- ApplyMsg{
-					CommandValid: true,
-					Command:      args.Entries[entIdx].Command,
-					CommandIndex: rf.lastLogIndex,
-				}
-				rf.lastApplied = rf.lastLogIndex
-			}
-		}
-		rf.lastLogIndex = len(rf.logs) - 1
 	}
 }
 
@@ -454,6 +451,11 @@ func (rf *Raft) ticker() {
 			go rf.rpcTicker(idx)
 		}
 
+		go func() {
+			time.Sleep(time.Millisecond * 200)
+			rf.condTicker.Broadcast()
+		}()
+
 		rf.muTicker.Lock()
 		rf.condTicker.Wait()
 		rf.muTicker.Unlock()
@@ -491,6 +493,8 @@ func (rf *Raft) rpcTicker(idx int) {
 	args.LastLogIndex = rf.lastLogIndex
 	if rf.lastLogIndex != 0 {
 		args.LastLogTerm = rf.logs[rf.lastLogIndex].Term
+	} else {
+		args.LastLogTerm = 0
 	}
 	rf.mu.Unlock()
 
@@ -537,7 +541,7 @@ func (rf *Raft) heartbeat() {
 			}
 		}
 
-		dPrint(3, rf.me, " 心跳")
+		//dPrint(3, rf.me, " 心跳")
 		for idx := range rf.peers {
 			if idx == rf.me {
 				continue
@@ -556,6 +560,9 @@ func (rf *Raft) heartbeat() {
 		if rf.serverType == 1 {
 			cnt := 0
 			noCommit := rf.commitIndex + rf.appliedStep
+			if noCommit > rf.lastLogIndex {
+				noCommit = rf.lastLogIndex
+			}
 			for i := 0; i < rf.serverNum; i++ {
 				if i == rf.me {
 					continue
@@ -567,16 +574,21 @@ func (rf *Raft) heartbeat() {
 
 			if cnt >= rf.serverNum/2 {
 				rf.commitIndex = noCommit
-				for i := rf.lastApplied + 1; i <= rf.commitIndex; i++ {
-					dPrint(3, rf.me, "\t应用日志", i, "\t", rf.logs[i].Command)
-					rf.applyCh <- ApplyMsg{
-						CommandValid: true,
-						Command:      rf.logs[i].Command,
-						CommandIndex: i,
+
+				if rf.commitIndex > rf.lastApplied && rf.logs[rf.commitIndex].Term == rf.currentTerm {
+					for i := rf.lastApplied + 1; i <= rf.commitIndex; i++ {
+						dPrint(3, rf.me, "\t应用日志", i, "\t", rf.logs[i].Command)
+						rf.applyCh <- ApplyMsg{
+							CommandValid: true,
+							Command:      rf.logs[i].Command,
+							CommandIndex: i,
+						}
+						rf.lastApplied += 1
 					}
 				}
+
 				if rf.appliedStep < 10 {
-					rf.appliedStep += 3
+					rf.appliedStep += 2
 				}
 			} else {
 				rf.appliedStep = 1
@@ -597,10 +609,7 @@ func (rf *Raft) rpcHeartbeat(server int) {
 	args.LeaderCommit = rf.commitIndex
 
 	start := rf.nextIndex[server]
-	end := start + 20
-	if end > rf.lastLogIndex {
-		end = rf.lastLogIndex
-	}
+	end := rf.lastLogIndex
 
 	if rf.lastLogIndex > 0 {
 		if start <= rf.lastLogIndex {
@@ -628,14 +637,6 @@ func (rf *Raft) rpcHeartbeat(server int) {
 		}
 		rf.mu.Unlock()
 	}
-
-	//rf.mu.Lock()
-	//rf.rpcNum -= 1
-	//if rf.rpcNum <= 0 {
-	//	rf.condHeartbeat.Broadcast()
-	//	dPrint(3, rf.me, " 心跳结束")
-	//}
-	//rf.mu.Unlock()
 }
 
 // Make the service or tester wants to create a Raft server. the ports
@@ -691,7 +692,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 func newElectionTime() int64 {
 	currTime := time.Now().UnixNano() / 1e6
-	return currTime + rand.Int63n(300) + 300
+	return currTime + rand.Int63n(200) + 200
 }
 
 func dPrint(t int, a ...interface{}) {
