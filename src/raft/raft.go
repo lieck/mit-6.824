@@ -18,6 +18,10 @@ package raft
 //
 
 import (
+	"bytes"
+	"sort"
+
+	//"labgob"
 	"log"
 	"math/rand"
 	//	"bytes"
@@ -25,7 +29,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	//	"6.824/labgob"
+	"6.824/labgob"
 	"6.824/labrpc"
 	//"labrpc"
 )
@@ -84,7 +88,6 @@ type Raft struct {
 	votesNum     int   // 投票数量
 	rpcNum       int   // rpc响应的server数量
 	serverNum    int   // 集群服务器数量
-	requestTime  int64 // 上次收到请求的时间
 
 	lastLogIndex int
 
@@ -98,7 +101,8 @@ type Raft struct {
 	nextIndex  []int
 	matchIndex []int
 
-	appliedStep int // 日志收敛
+	appliedStep int  // 日志收敛
+	isPersist   bool // 是否存在日志未持久化日志
 }
 
 // GetState return currentTerm and whether this server
@@ -131,6 +135,19 @@ func (rf *Raft) persist() {
 	// e.Encode(rf.yyy)
 	// data := w.Bytes()
 	// rf.persister.SaveRaftState(data)
+
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+
+	e.Encode(rf.currentTerm)
+	e.Encode(rf.votedFor)
+	for i := 1; i <= rf.lastLogIndex; i++ {
+		e.Encode(rf.logs[i])
+	}
+	dPrint(3, rf.me, "\t持久化", rf.lastLogIndex)
+	data := w.Bytes()
+	rf.persister.SaveRaftState(data)
+	rf.isPersist = false
 }
 
 //
@@ -153,6 +170,20 @@ func (rf *Raft) readPersist(data []byte) {
 	//   rf.xxx = xxx
 	//   rf.yyy = yyy
 	// }
+
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+
+	d.Decode(&rf.currentTerm)
+	d.Decode(&rf.votedFor)
+
+	var val = Entry{}
+	for d.Decode(&val) == nil {
+		rf.logs = append(rf.logs, val)
+	}
+	rf.lastLogIndex = len(rf.logs) - 1
+
+	dPrint(3, rf.me, "\t读取磁盘信息：", rf.currentTerm, "\t", rf.votedFor, "\t", rf.lastLogIndex)
 }
 
 // CondInstallSnapshot
@@ -213,16 +244,6 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	}
 	rf.currentTerm = args.Term
 
-	//dPrint(3, rf.me, " 收到投票请求", args.CandidateId)
-	//currTime := time.Now().UnixNano() / 1e6
-	//if currTime - rf.requestTime < 500 {
-	//	return
-	//}
-
-	//if rf.lastLogIndex == 0 && args.LastLogTerm > 0 {
-	//	return
-	//}
-
 	if rf.lastLogIndex > 0 {
 		if rf.logs[rf.lastLogIndex].Term > args.LastLogTerm {
 			return
@@ -251,13 +272,17 @@ type AppendEntriesArgs struct {
 type AppendEntriesReply struct {
 	Term    int
 	Success bool
+
+	XTerm  int
+	XIndex int
+	XLen   int
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
-	//dPrint(3, rf.me, " 收到 ", args.LeaderId, " 的心跳请求\t", rf.currentTerm)
+	dPrint(3, rf.me, " 收到 ", args.LeaderId, " 的心跳请求\t", rf.currentTerm)
 
 	reply.Term = rf.currentTerm
 	if args.Term < rf.currentTerm {
@@ -265,33 +290,42 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	} else if args.Term > rf.currentTerm {
 		rf.currentTerm = args.Term
 	}
-	rf.requestTime = time.Now().UnixNano() / 1e6
+
 	rf.electionTime = newElectionTime()
 	rf.serverType = 3
 
 	// 接收日志
-	reply.Success = false
-	if rf.lastLogIndex < args.PrevLogIndex {
-		return
-	}
-
-	if rf.logs[args.PrevLogIndex].Term != args.PrevLogTerm {
-		rf.logs = rf.logs[0:args.PrevLogIndex]
-		rf.lastLogIndex = len(rf.logs) - 1
-		return
-	}
-
-	reply.Success = true
 	if rf.lastLogIndex > args.PrevLogIndex {
 		rf.logs = rf.logs[0 : args.PrevLogIndex+1]
 		rf.lastLogIndex = len(rf.logs) - 1
 	}
 
+	reply.Success = false
+	if rf.lastLogIndex < args.PrevLogIndex ||
+		rf.logs[rf.lastLogIndex].Term != args.PrevLogTerm {
+
+		reply.XLen = rf.lastLogIndex
+		if rf.lastLogIndex > 0 {
+			reply.XTerm = rf.logs[rf.lastLogIndex].Term
+			reply.XIndex = rf.lastLogIndex
+			for reply.XIndex >= 2 && rf.logs[reply.XIndex-1].Term == reply.XTerm {
+				reply.XIndex -= 1
+			}
+		} else {
+			reply.XTerm = -1
+			reply.XIndex = -1
+		}
+		return
+	}
+
+	reply.Success = true
 	if args.Entries != nil {
 		for entIdx := 0; entIdx < len(args.Entries); entIdx++ {
 			rf.logs = append(rf.logs, args.Entries[entIdx])
 		}
 		dPrint(3, rf.me, "\t添加日志:[", args.PrevLogIndex+1, ",", len(rf.logs)-1, "]")
+		rf.lastLogIndex = len(rf.logs) - 1
+		rf.persist()
 	}
 	rf.lastLogIndex = len(rf.logs) - 1
 
@@ -303,7 +337,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	// 应用状态机
 	if rf.logs[rf.commitIndex].Term == rf.currentTerm {
-
 		for idx := rf.lastApplied + 1; idx <= rf.commitIndex; idx++ {
 			dPrint(3, rf.me, "\t应用日志", idx, "\t", rf.logs[idx].Command)
 			rf.applyCh <- ApplyMsg{
@@ -380,6 +413,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		})
 		rf.lastLogIndex = len(rf.logs) - 1
 		index = rf.lastLogIndex
+		rf.isPersist = true
 		dPrint(3, rf.me, " client entry:", rf.lastLogIndex, "\t", command, "\t", term)
 	}
 	rf.mu.Unlock()
@@ -401,8 +435,8 @@ func (rf *Raft) Kill() {
 	atomic.StoreInt32(&rf.dead, 1)
 	// Your code here, if desired.
 	rf.mu.Lock()
-	dPrint(3, rf.me, "\ttype:", rf.serverType, "\tterm:", rf.currentTerm)
-	dPrint(3, rf.me, "\tlastLogIndex:", rf.lastLogIndex)
+	//dPrint(3, rf.me, "\ttype:", rf.serverType, "\tterm:", rf.currentTerm)
+	//dPrint(3, rf.me, "\tlastLogIndex:", rf.lastLogIndex)
 	rf.mu.Unlock()
 }
 
@@ -434,6 +468,7 @@ func (rf *Raft) ticker() {
 		}
 
 		// 开始选举
+
 		rf.mu.Lock()
 		rf.currentTerm += 1
 		rf.votesNum = 0
@@ -441,8 +476,6 @@ func (rf *Raft) ticker() {
 		rf.rpcNum = 0
 		rf.votedFor = rf.me
 		rf.mu.Unlock()
-
-		dPrint(3, rf.me, " 开始选举")
 
 		for idx := range rf.peers {
 			if idx == rf.me {
@@ -452,7 +485,7 @@ func (rf *Raft) ticker() {
 		}
 
 		go func() {
-			time.Sleep(time.Millisecond * 200)
+			time.Sleep(time.Millisecond * 30)
 			rf.condTicker.Broadcast()
 		}()
 
@@ -462,8 +495,10 @@ func (rf *Raft) ticker() {
 
 		rf.mu.Lock()
 		rf.electionTime = newElectionTime()
+
+		dPrint(3, rf.me, " 选举", rf.votesNum)
 		if rf.serverType == 2 {
-			dPrint(2, rf.me, " 选举完成\t", rf.votesNum >= rf.serverNum/2)
+			//dPrint(3, rf.me, " 选举完成\t", rf.votesNum >= rf.serverNum/2)
 			if rf.votesNum >= rf.serverNum/2 {
 				// 选举成功
 				dPrint(3, rf.me, " 获取leader")
@@ -473,6 +508,7 @@ func (rf *Raft) ticker() {
 					rf.matchIndex[i] = 0
 					rf.nextIndex[i] = rf.lastLogIndex + 1
 				}
+
 				rf.condHeartbeat.Broadcast()
 			} else {
 				rf.serverType = 3
@@ -523,10 +559,6 @@ func (rf *Raft) rpcTicker(idx int) {
 func (rf *Raft) heartbeat() {
 
 	for rf.killed() == false {
-		rf.mu.Lock()
-		rf.rpcNum = rf.serverNum - 1
-		rf.mu.Unlock()
-
 		for {
 			rf.mu.Lock()
 			status := rf.serverType
@@ -541,6 +573,12 @@ func (rf *Raft) heartbeat() {
 			}
 		}
 
+		rf.mu.Lock()
+		if rf.isPersist {
+			rf.persist()
+		}
+		rf.mu.Unlock()
+
 		//dPrint(3, rf.me, " 心跳")
 		for idx := range rf.peers {
 			if idx == rf.me {
@@ -549,31 +587,16 @@ func (rf *Raft) heartbeat() {
 			go rf.rpcHeartbeat(idx)
 		}
 
-		// 等待rpc结束
-		//rf.muHeartbeat.Lock()
-		//rf.condHeartbeat.Wait()
-		//rf.muHeartbeat.Unlock()
-
-		time.Sleep(time.Millisecond * 120)
+		time.Sleep(time.Millisecond * 105)
 
 		rf.mu.Lock()
 		if rf.serverType == 1 {
-			cnt := 0
-			noCommit := rf.commitIndex + rf.appliedStep
-			if noCommit > rf.lastLogIndex {
-				noCommit = rf.lastLogIndex
-			}
-			for i := 0; i < rf.serverNum; i++ {
-				if i == rf.me {
-					continue
-				}
-				if rf.matchIndex[i] >= noCommit {
-					cnt++
-				}
-			}
+			arr := rf.matchIndex
+			sort.Ints(arr)
+			idx := arr[len(arr)/2+1]
 
-			if cnt >= rf.serverNum/2 {
-				rf.commitIndex = noCommit
+			if idx > rf.commitIndex {
+				rf.commitIndex = idx
 
 				if rf.commitIndex > rf.lastApplied && rf.logs[rf.commitIndex].Term == rf.currentTerm {
 					for i := rf.lastApplied + 1; i <= rf.commitIndex; i++ {
@@ -586,12 +609,6 @@ func (rf *Raft) heartbeat() {
 						rf.lastApplied += 1
 					}
 				}
-
-				if rf.appliedStep < 10 {
-					rf.appliedStep += 2
-				}
-			} else {
-				rf.appliedStep = 1
 			}
 		}
 		rf.mu.Unlock()
@@ -632,7 +649,22 @@ func (rf *Raft) rpcHeartbeat(server int) {
 			rf.nextIndex[server] = end + 1
 			rf.matchIndex[server] = end
 		} else {
-			rf.nextIndex[server] -= 1
+			idx := rf.lastLogIndex
+			for idx > 1 && rf.logs[idx].Term > reply.XTerm {
+				idx -= 1
+			}
+			if rf.logs[idx].Term == reply.XTerm {
+				rf.nextIndex[server] = idx
+			} else {
+				rf.nextIndex[server] = reply.XIndex
+			}
+			if rf.nextIndex[server] >= reply.XLen {
+				rf.nextIndex[server] = reply.XLen + 1
+			}
+			if rf.nextIndex[server] <= 0 {
+				rf.nextIndex[server] = 1
+			}
+
 			rf.matchIndex[server] = 0
 		}
 		rf.mu.Unlock()
@@ -685,14 +717,14 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	go rf.heartbeat()
 
-	//print("\n\n\n\n")
+	//print("\n")
 
 	return rf
 }
 
 func newElectionTime() int64 {
 	currTime := time.Now().UnixNano() / 1e6
-	return currTime + rand.Int63n(200) + 200
+	return currTime + rand.Int63n(400) + 300
 }
 
 func dPrint(t int, a ...interface{}) {
