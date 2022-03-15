@@ -272,6 +272,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		return
 	}
 	rf.currentTerm = args.Term
+	rf.serverType = 3
 
 	// 快照比较
 	if rf.snapshotTerm > args.LastLogTerm {
@@ -318,20 +319,20 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
+	dPrint(3, rf.me, "\t收到来自", args.LeaderId, "的心跳请求\tTerm:", args.Term, "\tcurrTerm:", rf.currentTerm)
+
 	reply.Success = false
 	reply.Term = rf.currentTerm
 	if args.Term < rf.currentTerm {
 		return
-	} else if args.Term > rf.currentTerm {
-		rf.currentTerm = args.Term
 	}
 
 	rf.electionTime = newElectionTime()
 	rf.serverType = 3
+	rf.currentTerm = args.Term
 
 	// 接收日志
 	if rf.lastLogIndex+rf.snapshotIndex > args.PrevLogIndex {
-		dPrint(3, rf.me, "\t日志剪辑", rf.snapshotIndex, "\t", rf.lastLogIndex, "\t", args.PrevLogIndex)
 		rf.logs = rf.logs[0 : args.PrevLogIndex-rf.snapshotIndex+1]
 		rf.lastLogIndex = len(rf.logs) - 1
 	}
@@ -616,7 +617,7 @@ func (rf *Raft) rpcTicker(idx int) {
 	ok := rf.peers[idx].Call("Raft.RequestVote", &args, &reply)
 	if ok {
 		rf.mu.Lock()
-		if reply.VoteGranted {
+		if reply.VoteGranted && args.Term == rf.currentTerm {
 			rf.votesNum += 1
 		} else if reply.Term > rf.currentTerm {
 			rf.serverType = 3
@@ -687,6 +688,10 @@ func (rf *Raft) heartbeat() {
 					dPrint(3, rf.me, "\t应用日志\t", index, ":", index+len(tLogs)-1)
 
 					rf.lastApplied = rf.commitIndex
+
+					if rf.isPersist {
+						rf.persist()
+					}
 				}
 			}
 		}
@@ -699,6 +704,11 @@ func (rf *Raft) rpcHeartbeat(server int) {
 	reply := AppendEntriesReply{}
 
 	rf.mu.Lock()
+	if rf.serverType != 1 {
+		rf.mu.Unlock()
+		return
+	}
+
 	args.LeaderId = rf.me
 	args.Term = rf.currentTerm
 	args.Entries = nil
@@ -711,7 +721,6 @@ func (rf *Raft) rpcHeartbeat(server int) {
 
 	args.PrevLogIndex = rf.snapshotIndex
 	args.PrevLogTerm = rf.snapshotTerm
-	dPrint(3, rf.me, "\t发送心跳请求old server：", server, ",", args.PrevLogIndex)
 	isSnapshot := false
 
 	if start <= 0 {
@@ -734,7 +743,6 @@ func (rf *Raft) rpcHeartbeat(server int) {
 		}
 		rf.mu.Unlock()
 	}
-	dPrint(3, rf.me, "\t发送心跳请求server：", server, ",", args.PrevLogIndex)
 
 	ok := rf.peers[server].Call("Raft.AppendEntries", &args, &reply)
 	if ok {
@@ -843,6 +851,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.readPersist(persister.ReadRaftState())
 	rf.readSnapshot(persister.ReadSnapshot())
 
+	dPrint(3, rf.me, "\t重启")
+
 	// start ticker goroutine to start elections
 	go rf.ticker()
 
@@ -857,7 +867,7 @@ func newElectionTime() int64 {
 }
 
 func dPrint(t int, a ...interface{}) {
-	debugType := 31
+	debugType := 3
 	if t == debugType {
 		//currTime := time.Now()
 		//print(currTime.Hour(), ":", currTime.Minute(), ":", currTime.Second(), "-")
