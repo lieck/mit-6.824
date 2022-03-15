@@ -492,6 +492,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	isLeader := true
 
 	// Your code here (2B).
+
 	rf.mu.Lock()
 	isLeader = rf.serverType == 1
 	term = rf.currentTerm
@@ -590,7 +591,7 @@ func (rf *Raft) ticker() {
 				rf.matchIndex[i] = 0
 				rf.nextIndex[i] = rf.lastLogIndex + rf.snapshotIndex + 1
 			}
-
+			rf.persist()
 			rf.condHeartbeat.Broadcast()
 		} else {
 			rf.serverType = 3
@@ -750,33 +751,35 @@ func (rf *Raft) rpcHeartbeat(server int) {
 		if reply.Term > rf.currentTerm {
 			rf.serverType = 3
 			rf.currentTerm = reply.Term
-		} else if reply.Success {
-			rf.nextIndex[server] = endLogIndex + 1
-			rf.matchIndex[server] = endLogIndex
-			dPrint(3, rf.me, "\t日志确定成功：", server, ",", rf.nextIndex[server])
-		} else if !isSnapshot {
-			if rf.lastLogIndex > 0 {
-				idx := rf.lastLogIndex
-				for idx > 1 && rf.logs[idx].Term > reply.XTerm {
-					idx -= 1
-				}
-				if rf.logs[idx].Term == reply.XTerm {
-					rf.nextIndex[server] = idx + rf.snapshotIndex
+		} else if args.Term == rf.currentTerm {
+			if reply.Success {
+				rf.nextIndex[server] = endLogIndex + 1
+				rf.matchIndex[server] = endLogIndex
+				dPrint(3, rf.me, "\t日志确定成功：", server, ",", rf.nextIndex[server])
+			} else if !isSnapshot {
+				if rf.lastLogIndex > 0 {
+					idx := rf.lastLogIndex
+					for idx > 1 && rf.logs[idx].Term > reply.XTerm {
+						idx -= 1
+					}
+					if rf.logs[idx].Term == reply.XTerm {
+						rf.nextIndex[server] = idx + rf.snapshotIndex
+					} else {
+						rf.nextIndex[server] = reply.XIndex
+					}
+					if rf.nextIndex[server] >= reply.XLen {
+						rf.nextIndex[server] = reply.XLen + 1
+					}
 				} else {
-					rf.nextIndex[server] = reply.XIndex
+					rf.nextIndex[server] = 1
 				}
-				if rf.nextIndex[server] >= reply.XLen {
-					rf.nextIndex[server] = reply.XLen + 1
-				}
-			} else {
-				rf.nextIndex[server] = 1
-			}
 
-			if rf.nextIndex[server] <= 0 {
-				rf.nextIndex[server] = 1
+				if rf.nextIndex[server] <= 0 {
+					rf.nextIndex[server] = 1
+				}
+				rf.matchIndex[server] = 0
+				dPrint(3, rf.me, "\t日志返回:", server, "\t", rf.nextIndex[server], "\t", reply.XIndex)
 			}
-			rf.matchIndex[server] = 0
-			dPrint(3, rf.me, "\t日志返回:", server, "\t", rf.nextIndex[server], "\t", reply.XIndex)
 		}
 		rf.mu.Unlock()
 	}
