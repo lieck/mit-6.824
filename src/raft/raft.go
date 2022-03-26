@@ -23,15 +23,14 @@ import (
 
 	"log"
 	"math/rand"
-	//	"bytes"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	"6.824/labgob"
-	"6.824/labrpc"
-	//"labrpc"
-	//"labgob"
+	"labgob"
+	//"6.824/labgob"
+	//"6.824/labrpc"
+	"labrpc"
 )
 
 // ApplyMsg
@@ -153,9 +152,11 @@ func (rf *Raft) persist() {
 	// snapshot
 	wSnapshot := new(bytes.Buffer)
 	eSnapshot := labgob.NewEncoder(wSnapshot)
-	eSnapshot.Encode(rf.snapshotTerm)
-	eSnapshot.Encode(rf.snapshotIndex)
-	eSnapshot.Encode(rf.snapshotData)
+	if rf.snapshotIndex > 0 {
+		eSnapshot.Encode(rf.snapshotTerm)
+		eSnapshot.Encode(rf.snapshotIndex)
+		eSnapshot.Encode(rf.snapshotData)
+	}
 	dataSnapshot := wSnapshot.Bytes()
 
 	rf.persister.SaveStateAndSnapshot(dataState, dataSnapshot)
@@ -222,7 +223,7 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	rf.lastLogIndex = len(rf.logs) - 1
 
 	rf.persist()
-	dPrint(3, rf.me, "\t快照生成:", rf.snapshotIndex)
+	//dPrint(3, rf.me, "\t快照生成:", rf.snapshotIndex)
 }
 
 func (rf *Raft) apply(index int, logs []Entry) {
@@ -291,7 +292,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		}
 	}
 
-	dPrint(3, rf.me, "\t投票", args.CandidateId, "\t", args.LastLogIndex, ":", args.LastLogTerm, "\t", rf.snapshotIndex, ":", rf.lastLogIndex, ",", rf.snapshotTerm, ":", rf.logs[rf.lastLogIndex].Term)
+	//dPrint(3, rf.me, "\t投票", args.CandidateId, "\t", args.LastLogIndex, ":", args.LastLogTerm, "\t", rf.snapshotIndex, ":", rf.lastLogIndex, ",", rf.snapshotTerm, ":", rf.logs[rf.lastLogIndex].Term)
 	reply.VoteGranted = true
 	rf.serverType = 3
 	rf.votedFor = args.CandidateId
@@ -319,7 +320,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
-	dPrint(3, rf.me, "\t收到来自", args.LeaderId, "的心跳请求\tTerm:", args.Term, "\tcurrTerm:", rf.currentTerm)
+	//dPrint(3, rf.me, "\t收到来自", args.LeaderId, "的心跳请求\tTerm:", args.Term, "\tcurrTerm:", rf.currentTerm)
 
 	reply.Success = false
 	reply.Term = rf.currentTerm
@@ -340,7 +341,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if rf.lastLogIndex+rf.snapshotIndex < args.PrevLogIndex ||
 		rf.lastLogIndex > 0 && rf.logs[rf.lastLogIndex].Term != args.PrevLogTerm {
 
-		dPrint(3, rf.me, "\t收到日志错误\t", rf.lastLogIndex+rf.snapshotIndex, "\t", args.PrevLogIndex)
+		//dPrint(3, rf.me, "\t收到日志错误\t", rf.lastLogIndex+rf.snapshotIndex, "\t", args.PrevLogIndex)
 
 		reply.XLen = rf.lastLogIndex + rf.snapshotIndex
 		if rf.lastLogIndex > 0 {
@@ -388,54 +389,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		go rf.apply(index, tLogs)
 
 		rf.lastApplied = rf.commitIndex
-		dPrint(3, rf.me, "\t应用状态机\t", index, ":", len(tLogs)+index-1)
 	}
-}
-
-type InstallSnapshotArgs struct {
-	Term              int
-	LeaderId          int
-	LastIncludedIndex int
-	LastIncludedTerm  int
-	Offset            int
-	Data              []byte
-	Done              bool
-}
-
-type InstallSnapshotReply struct {
-	Term int
-}
-
-func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-
-	reply.Term = rf.currentTerm
-	if args.Term < rf.currentTerm {
-		return
-	}
-	rf.currentTerm = args.Term
-	rf.serverType = 3
-	rf.votedFor = args.LeaderId
-
-	dPrint(3, rf.me, "\t收到快照:", args.LastIncludedIndex)
-
-	rf.snapshotData = args.Data
-	rf.snapshotIndex = args.LastIncludedIndex
-	rf.snapshotTerm = args.LastIncludedTerm
-
-	rf.logs = make([]Entry, 1)
-	rf.lastLogIndex = 0
-	rf.commitIndex = 0
-	rf.lastApplied = 0
-
-	msg := ApplyMsg{
-		SnapshotValid: true,
-		Snapshot:      args.Data,
-		SnapshotTerm:  args.Term,
-		SnapshotIndex: args.LastIncludedIndex,
-	}
-	rf.applyCh <- msg
 }
 
 //
@@ -492,7 +446,6 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	isLeader := true
 
 	// Your code here (2B).
-
 	rf.mu.Lock()
 	isLeader = rf.serverType == 1
 	term = rf.currentTerm
@@ -505,7 +458,6 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		rf.matchIndex[rf.me] = len(rf.logs) + rf.snapshotIndex - 1
 		index = rf.lastLogIndex + rf.snapshotIndex
 		rf.isPersist = true
-		dPrint(3, rf.me, "\tleader收到日志:", index)
 	}
 	rf.mu.Unlock()
 	return index, term, isLeader
@@ -584,7 +536,8 @@ func (rf *Raft) ticker() {
 
 		if rf.serverType == 2 && rf.votesNum >= rf.serverNum/2 {
 			// 选举成功
-			dPrint(3, rf.me, "\t获取leader")
+			//dPrint(3, rf.me, "\t获取leader")
+			DPrintf("%v\t获取Leader------------------------------", rf.me)
 			rf.serverType = 1
 			rf.votedFor = rf.me
 			for i := 0; i < rf.serverNum; i++ {
@@ -656,7 +609,7 @@ func (rf *Raft) heartbeat() {
 			rf.persist()
 		}
 		rf.mu.Unlock()
-		dPrint(3, rf.me, "\t发送心跳请求")
+		//dPrint(3, rf.me, "\t发送心跳请求")
 
 		for idx := range rf.peers {
 			if idx == rf.me {
@@ -726,7 +679,7 @@ func (rf *Raft) rpcHeartbeat(server int) {
 
 	if start <= 0 {
 		isSnapshot = true
-		dPrint(3, rf.me, "\t日志缺失:", server, "\t", rf.nextIndex[server], "\t", rf.snapshotIndex)
+		//dPrint(3, rf.me, "\t日志缺失:", server, "\t", rf.nextIndex[server], "\t", rf.snapshotIndex)
 		// 日志缺失，发送快照
 		rf.mu.Unlock()
 		go rf.rpcInstallSnapshot(server)
@@ -755,7 +708,7 @@ func (rf *Raft) rpcHeartbeat(server int) {
 			if reply.Success {
 				rf.nextIndex[server] = endLogIndex + 1
 				rf.matchIndex[server] = endLogIndex
-				dPrint(3, rf.me, "\t日志确定成功：", server, ",", rf.nextIndex[server])
+				//dPrint(3, rf.me, "\t日志确定成功：", server, ",", rf.nextIndex[server])
 			} else if !isSnapshot {
 				if rf.lastLogIndex > 0 {
 					idx := rf.lastLogIndex
@@ -778,7 +731,7 @@ func (rf *Raft) rpcHeartbeat(server int) {
 					rf.nextIndex[server] = 1
 				}
 				rf.matchIndex[server] = 0
-				dPrint(3, rf.me, "\t日志返回:", server, "\t", rf.nextIndex[server], "\t", reply.XIndex)
+				//dPrint(3, rf.me, "\t日志返回:", server, "\t", rf.nextIndex[server], "\t", reply.XIndex)
 			}
 		}
 		rf.mu.Unlock()
@@ -808,7 +761,7 @@ func (rf *Raft) rpcInstallSnapshot(server int) {
 		} else {
 			rf.nextIndex[server] = args.LastIncludedIndex + 1
 			rf.matchIndex[server] = args.LastIncludedIndex
-			dPrint(3, rf.me, "\t快照确定成功:", server, "\t", rf.matchIndex[server])
+			//dPrint(3, rf.me, "\t快照确定成功:", server, "\t", rf.matchIndex[server])
 		}
 		rf.mu.Unlock()
 	}
@@ -854,7 +807,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.readPersist(persister.ReadRaftState())
 	rf.readSnapshot(persister.ReadSnapshot())
 
-	dPrint(3, rf.me, "\t重启")
+	//dPrint(3, rf.me, "\t重启")
 
 	// start ticker goroutine to start elections
 	go rf.ticker()
@@ -870,12 +823,8 @@ func newElectionTime() int64 {
 }
 
 func dPrint(t int, a ...interface{}) {
-	debugType := 3
+	debugType := 31
 	if t == debugType {
-		//currTime := time.Now()
-		//print(currTime.Hour(), ":", currTime.Minute(), ":", currTime.Second(), "-")
-		//print(currTime.Nanosecond() / 1e9, ' ')
-		//log.Print(time.Now().UnixNano() / 1e6)
 		log.Print(a...)
 	}
 	return

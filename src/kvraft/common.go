@@ -1,33 +1,42 @@
 package kvraft
 
 const (
-	OK             = "OK"
-	ErrNoKey       = "ErrNoKey"
-	ErrWrongLeader = "ErrWrongLeader"
+	OK              = "OK"
+	ErrNoKey        = "ErrNoKey"
+	ErrWrongLeader  = "ErrWrongLeader"
+	ErrWrongIndex   = "ErrWrongIndex"
+	ErrWrongNetwork = "ErrWrongNetwork"
 )
 
 type Err string
 
-// Put or Append
+// PutAppendArgs Put or Append
 type PutAppendArgs struct {
 	Key   string
 	Value string
 	Op    string // "Put" or "Append"
-	// You'll have to add definitions here.
-	// Field names must start with capital letters,
-	// otherwise RPC will break.
+
+	RequestId int64 // 请求ID
+	ClientId  int64 // 客户端ID
+	ServerId  int
 }
 
 type PutAppendReply struct {
-	Err Err
+	Err       Err
+	LastIndex int // 最后应用的请求状态
+	ServerId  int // leaderID
 }
 
 type GetArgs struct {
-	Key string
-	// You'll have to add definitions here.
+	Key       string
+	RequestId int64 // 请求ID
+	ClientId  int64 // 客户端ID
+	LastIndex int   // 最后应用的请求状态
 }
 
 type GetReply struct {
-	Err   Err
-	Value string
+	Err       Err
+	Value     string
+	LastIndex int // 最后应用的请求状态
+	ServerId  int
 }
