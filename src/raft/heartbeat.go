@@ -15,41 +15,42 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		return
 	}
 
+	//DPrintf("%v\t%v\t收到心跳", rf.me, time.Now().UnixNano() / 1e6)
 	rf.electionTime = newElectionTime()
-	rf.serverType = 3
+	rf.serverType = Follower
 	rf.currentTerm = args.Term
 
-	// 接收日志
+	// 裁剪多余的日志
 	if rf.lastLogIndex+rf.snapshotIndex > args.PrevLogIndex {
 		rf.logs = rf.logs[0 : args.PrevLogIndex-rf.snapshotIndex+1]
 		rf.lastLogIndex = len(rf.logs) - 1
 	}
 
-	// 日志错误处理
-	if rf.lastLogIndex+rf.snapshotIndex < args.PrevLogIndex ||
-		rf.lastLogIndex > 0 && rf.logs[rf.lastLogIndex].Term != args.PrevLogTerm {
-
+	// 不冲突，但缺少部分日志
+	if rf.lastLogIndex+rf.snapshotIndex < args.PrevLogIndex {
+		reply.XTerm = -1
+		reply.XIndex = -1
 		reply.XLen = rf.lastLogIndex + rf.snapshotIndex
-		if rf.lastLogIndex > 0 {
-			reply.XTerm = rf.logs[rf.lastLogIndex].Term
-			reply.XIndex = rf.lastLogIndex
-			for reply.XIndex >= 2 && rf.logs[reply.XIndex-1].Term == reply.XTerm {
-				reply.XIndex -= 1
-			}
-			reply.XIndex += rf.snapshotIndex
-		} else if rf.snapshotIndex > 0 {
-			reply.XTerm = rf.snapshotTerm
-			reply.XIndex = rf.snapshotIndex
-		} else {
-			reply.XTerm = -1
-			reply.XIndex = -1
+		return
+	}
+
+	// 日志冲突
+	if rf.lastLogIndex > 0 && rf.logs[rf.lastLogIndex].Term != args.PrevLogTerm {
+		// 计算对应任期的第一条槽位号
+		reply.XTerm = rf.logs[rf.lastLogIndex].Term
+		reply.XIndex = rf.lastLogIndex
+		for reply.XIndex >= 2 && rf.logs[reply.XIndex-1].Term == reply.XTerm {
+			reply.XIndex -= 1
 		}
+		reply.XIndex += rf.snapshotIndex
+		reply.XLen = rf.lastLogIndex + rf.snapshotIndex
 		return
 	}
 
 	// 添加到logs
 	reply.Success = true
 	if args.Entries != nil {
+		DPrintf("%v\t收到Log\t[%v:%v]", rf.me, rf.lastLogIndex+1, rf.lastLogIndex+len(args.Entries))
 		for entIdx := 0; entIdx < len(args.Entries); entIdx++ {
 			rf.logs = append(rf.logs, args.Entries[entIdx])
 		}
@@ -78,150 +79,141 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 }
 
 func (rf *Raft) heartbeat() {
-	for rf.killed() == false {
-		for {
-			rf.mu.Lock()
-			status := rf.serverType
-			rf.mu.Unlock()
-
-			if status != 1 {
-				rf.muHeartbeat.Lock()
-				rf.condHeartbeat.Wait()
-				rf.muHeartbeat.Unlock()
-			} else {
-				break
-			}
-		}
-
-		rf.mu.Lock()
-		if rf.isPersist {
-			rf.persist()
-		}
-		rf.mu.Unlock()
-		//dPrint(3, rf.me, "\t发送心跳请求")
-
-		for idx := range rf.peers {
-			if idx == rf.me {
-				continue
-			}
-			go rf.rpcHeartbeat(idx)
-		}
-
-		time.Sleep(time.Millisecond * 105)
-
-		rf.mu.Lock()
-		if rf.serverType == 1 {
-			var arr []int
-			for _, val := range rf.matchIndex {
-				arr = append(arr, val)
-			}
-			sort.Ints(arr)
-			idx := arr[len(arr)/2] - rf.snapshotIndex
-
-			if idx > rf.commitIndex {
-				rf.commitIndex = idx
-				if rf.lastApplied < rf.commitIndex && rf.logs[rf.commitIndex].Term == rf.currentTerm {
-
-					tLogs := make([]Entry, 0)
-					for i := rf.lastApplied + 1; i <= rf.commitIndex; i++ {
-						tLogs = append(tLogs, rf.logs[i])
-					}
-					index := rf.lastApplied + rf.snapshotIndex + 1
-					go rf.apply(index, tLogs)
-
-					rf.lastApplied = rf.commitIndex
-
-					if rf.isPersist {
-						rf.persist()
-					}
-				}
-			}
-		}
-		rf.mu.Unlock()
-	}
-}
-
-func (rf *Raft) rpcHeartbeat(server int) {
-	args := AppendEntriesArgs{}
-	reply := AppendEntriesReply{}
-
-	rf.mu.Lock()
-	if rf.serverType != 1 {
-		rf.mu.Unlock()
+	// 距离上次心跳请求不到100ms不发送
+	if time.Now().UnixNano()/1e6-rf.heartbeatTime < 100 {
 		return
 	}
 
-	args.LeaderId = rf.me
-	args.Term = rf.currentTerm
-	args.Entries = nil
-	args.LeaderCommit = rf.commitIndex + rf.snapshotIndex
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 
-	start := rf.nextIndex[server] - rf.snapshotIndex
-	end := rf.lastLogIndex
+	rf.electionTime = newElectionTime()
+	rf.heartbeatTime = time.Now().UnixNano() / 1e6
 
-	endLogIndex := rf.lastLogIndex + rf.snapshotIndex
+	for server := range rf.peers {
+		if server == rf.me {
+			continue
+		}
 
-	args.PrevLogIndex = rf.snapshotIndex
-	args.PrevLogTerm = rf.snapshotTerm
-	isSnapshot := false
+		args := AppendEntriesArgs{
+			Term:         rf.currentTerm,
+			LeaderId:     rf.me,
+			PrevLogIndex: rf.snapshotIndex,
+			PrevLogTerm:  rf.snapshotTerm,
+			Entries:      nil,
+			LeaderCommit: rf.commitIndex + rf.snapshotIndex,
+		}
+		start := rf.nextIndex[server] - rf.snapshotIndex
+		end := rf.lastLogIndex
 
-	if start <= 0 {
-		isSnapshot = true
-		//dPrint(3, rf.me, "\t日志缺失:", server, "\t", rf.nextIndex[server], "\t", rf.snapshotIndex)
-		// 日志缺失，发送快照
-		rf.mu.Unlock()
-		go rf.rpcInstallSnapshot(server)
-	} else {
-		if rf.lastLogIndex > 0 {
-			if start <= rf.lastLogIndex {
-				for i := start; i <= end; i++ {
-					args.Entries = append(args.Entries, rf.logs[i])
+		endLogIndex := rf.lastLogIndex + rf.snapshotIndex
+		isSnapshot := false
+
+		if start <= 0 {
+			isSnapshot = true
+			go rf.rpcInstallSnapshot(server)
+		} else {
+			if rf.lastLogIndex > 0 {
+				if start <= rf.lastLogIndex {
+					for i := start; i <= end; i++ {
+						args.Entries = append(args.Entries, rf.logs[i])
+					}
+				}
+				if start > 1 {
+					args.PrevLogIndex = start + rf.snapshotIndex - 1
+					args.PrevLogTerm = rf.logs[start-1].Term
 				}
 			}
-			if start > 1 {
-				args.PrevLogIndex = start + rf.snapshotIndex - 1
-				args.PrevLogTerm = rf.logs[start-1].Term
-			}
 		}
-		rf.mu.Unlock()
+
+		if end >= start {
+			DPrintf("%v\t往%v发送Log:\t[%v:%v]", rf.me, server, start, end)
+		}
+
+		go rf.sendHeartbeat(server, &args, endLogIndex, isSnapshot)
+	}
+}
+
+func (rf *Raft) sendHeartbeat(server int, args *AppendEntriesArgs, endLogIndex int, isSnapshot bool) {
+	reply := AppendEntriesReply{}
+
+	start := time.Now().UnixNano() / 1e6
+	//DPrintf("%v\t发送心跳至%v", rf.me, server)
+
+	ok := rf.peers[server].Call("Raft.AppendEntries", args, &reply)
+	if !ok || time.Now().UnixNano()/1e6-start >= 100 {
+		return
 	}
 
-	ok := rf.peers[server].Call("Raft.AppendEntries", &args, &reply)
-	if ok {
-		rf.mu.Lock()
-		if reply.Term > rf.currentTerm {
-			rf.serverType = 3
-			rf.currentTerm = reply.Term
-		} else if args.Term == rf.currentTerm {
-			if reply.Success {
-				rf.nextIndex[server] = endLogIndex + 1
-				rf.matchIndex[server] = endLogIndex
-				//dPrint(3, rf.me, "\t日志确定成功：", server, ",", rf.nextIndex[server])
-			} else if !isSnapshot {
-				if rf.lastLogIndex > 0 {
-					idx := rf.lastLogIndex
-					for idx > 1 && rf.logs[idx].Term > reply.XTerm {
-						idx -= 1
-					}
-					if rf.logs[idx].Term == reply.XTerm {
-						rf.nextIndex[server] = idx + rf.snapshotIndex
-					} else {
-						rf.nextIndex[server] = reply.XIndex
-					}
-					if rf.nextIndex[server] >= reply.XLen {
-						rf.nextIndex[server] = reply.XLen + 1
-					}
-				} else {
-					rf.nextIndex[server] = 1
-				}
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 
-				if rf.nextIndex[server] <= 0 {
-					rf.nextIndex[server] = 1
-				}
-				rf.matchIndex[server] = 0
-				//dPrint(3, rf.me, "\t日志返回:", server, "\t", rf.nextIndex[server], "\t", reply.XIndex)
+	if reply.Term < rf.currentTerm {
+		return
+	}
+
+	if reply.Term > rf.currentTerm {
+		rf.serverType = Follower
+		rf.currentTerm = reply.Term
+		return
+	}
+
+	if reply.Success {
+		DPrintf("%v\t确认%v Log\t[1:%v]", rf.me, server, endLogIndex)
+		rf.nextIndex[server] = max(endLogIndex+1, rf.nextIndex[server])
+		rf.matchIndex[server] = max(endLogIndex, rf.matchIndex[server])
+	} else if !isSnapshot {
+		if reply.XTerm == -1 {
+			// 不冲突，但是缺少部分日志
+			rf.nextIndex[server] = reply.XLen + 1
+		} else {
+			// 冲突：以Term为单位回退
+			// 搜索Logs内是否包含对应 Term
+			idx := rf.lastLogIndex
+			for idx > 0 && rf.logs[idx].Term > reply.XTerm {
+				idx--
+			}
+
+			if idx == 0 {
+				// 需要重新开始发送
+				rf.nextIndex[server] = 1
+			} else if rf.logs[idx].Term == reply.XTerm {
+				// Logs包含日志对应的Term
+				rf.nextIndex[server] = idx + rf.snapshotIndex
+			} else {
+				// Logs不包含日志对应的Term
+				rf.nextIndex[server] = reply.XIndex
 			}
 		}
-		rf.mu.Unlock()
+		DPrintf("%v\t失败%v Log\t%v\t参数\tXTerm:%v,XIndex:%v,XLen:%v", rf.me, server, rf.nextIndex[server], reply.XTerm, reply.XIndex, reply.XLen)
+	}
+	rf.commitEntryL()
+}
+
+func (rf *Raft) commitEntryL() {
+	var arr []int
+	for _, val := range rf.matchIndex {
+		arr = append(arr, val)
+	}
+	sort.Ints(arr)
+	idx := arr[len(arr)/2] - rf.snapshotIndex
+
+	if idx > rf.commitIndex {
+		rf.commitIndex = idx
+		DPrintf("%v\tLeader commitIndex:%v", rf.me, rf.commitIndex)
+		if rf.lastApplied < rf.commitIndex && rf.logs[rf.commitIndex].Term == rf.currentTerm {
+			tLogs := make([]Entry, 0)
+			for i := rf.lastApplied + 1; i <= rf.commitIndex; i++ {
+				tLogs = append(tLogs, rf.logs[i])
+			}
+			index := rf.lastApplied + rf.snapshotIndex + 1
+			go rf.apply(index, tLogs)
+
+			rf.lastApplied = rf.commitIndex
+
+			if rf.isPersist {
+				rf.persist()
+			}
+		}
 	}
 }

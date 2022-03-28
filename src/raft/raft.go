@@ -23,9 +23,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	//"6.824/labgob"
-	//"6.824/labrpc"
-	"labrpc"
+	"6.824/labrpc"
+	//"labrpc"
 )
 
 // ApplyMsg
@@ -80,8 +79,9 @@ type Raft struct {
 	serverType   int   // 服务器类型
 	electionTime int64 // 选举超时时间
 	votesNum     int   // 投票数量
-	requestNum   int   // rpc响应的server数量
 	serverNum    int   // 集群服务器数量
+
+	heartbeatTime int64
 
 	currentTerm int
 	votedFor    int
@@ -112,7 +112,7 @@ func (rf *Raft) GetState() (int, bool) {
 	// Your code here (2A).
 	rf.mu.Lock()
 	term = rf.currentTerm
-	isleader = rf.serverType == 1
+	isleader = rf.serverType == Leader
 	rf.mu.Unlock()
 
 	return term, isleader
@@ -128,6 +128,7 @@ func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int,
 }
 
 func (rf *Raft) apply(index int, logs []Entry) {
+	DPrintf("%v\t应用状态机\t[%v:%v]", rf.me, index, index+len(logs)-1)
 	for i, val := range logs {
 		rf.applyCh <- ApplyMsg{
 			CommandValid: true,
@@ -186,14 +187,13 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 // the leader.
 //
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
-	index := -1
-	term := -1
-	isLeader := true
-
-	// Your code here (2B).
 	rf.mu.Lock()
-	isLeader = rf.serverType == 1
-	term = rf.currentTerm
+	defer rf.mu.Unlock()
+
+	index := -1
+	term := rf.currentTerm
+	isLeader := rf.serverType == Leader
+
 	if isLeader {
 		rf.logs = append(rf.logs, Entry{
 			Term:    term,
@@ -203,8 +203,13 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		rf.matchIndex[rf.me] = len(rf.logs) + rf.snapshotIndex - 1
 		index = rf.lastLogIndex + rf.snapshotIndex
 		rf.isPersist = true
+
+		DPrintf("%v\tStart Entry\t%v", rf.me, index)
+
+		// 发送Log
+		go rf.heartbeat()
 	}
-	rf.mu.Unlock()
+
 	return index, term, isLeader
 }
 
@@ -222,15 +227,41 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 func (rf *Raft) Kill() {
 	atomic.StoreInt32(&rf.dead, 1)
 	// Your code here, if desired.
-	rf.mu.Lock()
-	//dPrint(3, rf.me, "\ttype:", rf.serverType, "\tterm:", rf.currentTerm)
-	//dPrint(3, rf.me, "\tlastLogIndex:", rf.lastLogIndex)
-	rf.mu.Unlock()
+
 }
 
 func (rf *Raft) killed() bool {
 	z := atomic.LoadInt32(&rf.dead)
 	return z == 1
+}
+
+// The ticker go routine starts a new election if this peer hasn't received
+// heartsbeats recently.
+func (rf *Raft) ticker() {
+
+	for rf.killed() == false {
+		var sleepTime int64 = 100
+
+		rf.mu.Lock()
+		if rf.serverType == Leader {
+			// 发送心跳请求
+			go rf.heartbeat()
+		} else {
+			// 发起选举
+			sleepTime = rf.electionTime - time.Now().UnixNano()/1e6
+			if sleepTime <= 0 {
+				rf.electionTime = newElectionTime()
+				sleepTime = rf.electionTime - time.Now().UnixNano()/1e6
+				go rf.election()
+			}
+		}
+		rf.mu.Unlock()
+		if sleepTime > 100 {
+			sleepTime = 100
+		}
+		time.Sleep(time.Duration(sleepTime) * time.Millisecond)
+
+	}
 }
 
 // Make the service or tester wants to create a Raft server. the ports
@@ -274,8 +305,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// start ticker goroutine to start elections
 	go rf.ticker()
-
-	go rf.heartbeat()
 
 	return rf
 }
