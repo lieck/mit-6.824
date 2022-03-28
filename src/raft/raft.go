@@ -69,10 +69,8 @@ type Raft struct {
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
 
-	muTicker      sync.Mutex
-	muHeartbeat   sync.Mutex
-	condTicker    *sync.Cond
-	condHeartbeat *sync.Cond
+	muApply   sync.Mutex
+	condApply *sync.Cond
 
 	applyCh chan ApplyMsg
 
@@ -135,6 +133,32 @@ func (rf *Raft) apply(index int, logs []Entry) {
 			Command:      val.Command,
 			CommandIndex: i + index,
 		}
+	}
+}
+
+func (rf *Raft) applyEd() {
+	for rf.killed() == false {
+		rf.mu.Lock()
+
+		start := rf.lastApplied + 1
+		logs := make([]Entry, 0)
+
+		if rf.lastApplied < rf.commitIndex && rf.logs[rf.commitIndex].Term == rf.currentTerm {
+			for i := start; i <= rf.commitIndex; i++ {
+				logs = append(logs, rf.logs[i])
+				rf.lastApplied++
+			}
+		}
+
+		rf.mu.Unlock()
+
+		if len(logs) >= 1 {
+			rf.apply(start, logs)
+		}
+
+		rf.muApply.Lock()
+		rf.condApply.Wait()
+		rf.muApply.Unlock()
 	}
 }
 
@@ -205,6 +229,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		rf.isPersist = true
 
 		DPrintf("%v\tStart Entry\t%v", rf.me, index)
+		DPrintf("%v\tlastLogIndex:%v", rf.me, rf.lastLogIndex)
 
 		// 发送Log
 		go rf.heartbeat()
@@ -227,7 +252,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 func (rf *Raft) Kill() {
 	atomic.StoreInt32(&rf.dead, 1)
 	// Your code here, if desired.
-
+	rf.condApply.Broadcast()
 }
 
 func (rf *Raft) killed() bool {
@@ -282,8 +307,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.me = me
 
 	// Your initialization code here (2A, 2B, 2C).
-	rf.condTicker = sync.NewCond(&rf.muTicker)
-	rf.condHeartbeat = sync.NewCond(&rf.muHeartbeat)
+	rf.condApply = sync.NewCond(&rf.muApply)
 	rf.applyCh = applyCh
 
 	rf.currentTerm = 0
@@ -298,6 +322,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.commitIndex = 0
 	rf.lastApplied = 0
 	rf.lastLogIndex = 0
+	rf.snapshotTerm = 0
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
@@ -305,6 +330,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// start ticker goroutine to start elections
 	go rf.ticker()
+
+	go rf.applyEd()
 
 	return rf
 }

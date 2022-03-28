@@ -29,6 +29,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 			return
 		}
 	}
+	DPrintf("%v\t投票给%v\taTerm:%v,aIdx:%v\tTerm:%v,idx:%v", rf.me, args.CandidateId, args.Term, args.LastLogIndex, rf.logs[rf.lastLogIndex].Term, rf.lastLogIndex)
 
 	// 投票
 	reply.VoteGranted = true

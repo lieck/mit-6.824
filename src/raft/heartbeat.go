@@ -15,7 +15,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		return
 	}
 
-	//DPrintf("%v\t%v\t收到心跳", rf.me, time.Now().UnixNano() / 1e6)
+	DPrintf("%v\t收到心跳", rf.me)
 	rf.electionTime = newElectionTime()
 	rf.serverType = Follower
 	rf.currentTerm = args.Term
@@ -67,16 +67,11 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.commitIndex = args.LeaderCommit - rf.snapshotIndex
 	}
 
+	DPrintf("%v\tlastLogIndex:%v", rf.me, rf.lastLogIndex)
+
 	// 应用状态机
 	if rf.commitIndex > 0 && rf.logs[rf.commitIndex].Term == rf.currentTerm && rf.lastApplied < rf.commitIndex {
-		tLogs := make([]Entry, 0)
-		for i := rf.lastApplied + 1; i <= rf.commitIndex; i++ {
-			tLogs = append(tLogs, rf.logs[i])
-		}
-		index := rf.lastApplied + rf.snapshotIndex + 1
-		go rf.apply(index, tLogs)
-
-		rf.lastApplied = rf.commitIndex
+		rf.condApply.Broadcast()
 	}
 }
 
@@ -88,6 +83,11 @@ func (rf *Raft) heartbeat() {
 
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+
+	// 持久化
+	if rf.isPersist {
+		rf.persist()
+	}
 
 	rf.electionTime = newElectionTime()
 	rf.heartbeatTime = time.Now().UnixNano() / 1e6
@@ -133,6 +133,10 @@ func (rf *Raft) heartbeat() {
 		}
 
 		go rf.sendHeartbeat(server, &args, endLogIndex, isSnapshot)
+
+		if rf.lastApplied < rf.commitIndex {
+			rf.condApply.Broadcast()
+		}
 	}
 }
 
@@ -203,19 +207,5 @@ func (rf *Raft) commitEntryL() {
 	if idx > rf.commitIndex {
 		rf.commitIndex = idx
 		DPrintf("%v\tLeader commitIndex:%v", rf.me, rf.commitIndex)
-		if rf.lastApplied < rf.commitIndex && rf.logs[rf.commitIndex].Term == rf.currentTerm {
-			tLogs := make([]Entry, 0)
-			for i := rf.lastApplied + 1; i <= rf.commitIndex; i++ {
-				tLogs = append(tLogs, rf.logs[i])
-			}
-			index := rf.lastApplied + rf.snapshotIndex + 1
-			go rf.apply(index, tLogs)
-
-			rf.lastApplied = rf.commitIndex
-
-			if rf.isPersist {
-				rf.persist()
-			}
-		}
 	}
 }
