@@ -36,14 +36,16 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	// 日志冲突
 	if rf.lastLogIndex > 0 && rf.logs[rf.lastLogIndex].Term != args.PrevLogTerm {
-		// 计算对应任期的第一条槽位号
+		reply.XLen = rf.lastLogIndex + rf.snapshotIndex
 		reply.XTerm = rf.logs[rf.lastLogIndex].Term
+
+		// 计算对应任期的第一条槽位号
 		reply.XIndex = rf.lastLogIndex
 		for reply.XIndex >= 2 && rf.logs[reply.XIndex-1].Term == reply.XTerm {
 			reply.XIndex -= 1
 		}
 		reply.XIndex += rf.snapshotIndex
-		reply.XLen = rf.lastLogIndex + rf.snapshotIndex
+
 		return
 	}
 
@@ -66,7 +68,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 
 	// 应用状态机
-	if rf.logs[rf.commitIndex].Term == rf.currentTerm && rf.lastApplied < rf.commitIndex {
+	if rf.commitIndex > 0 && rf.logs[rf.commitIndex].Term == rf.currentTerm && rf.lastApplied < rf.commitIndex {
 		tLogs := make([]Entry, 0)
 		for i := rf.lastApplied + 1; i <= rf.commitIndex; i++ {
 			tLogs = append(tLogs, rf.logs[i])
@@ -159,7 +161,7 @@ func (rf *Raft) sendHeartbeat(server int, args *AppendEntriesArgs, endLogIndex i
 	}
 
 	if reply.Success {
-		DPrintf("%v\t确认%v Log\t[1:%v]", rf.me, server, endLogIndex)
+		//DPrintf("%v\t确认%v Log\t[1:%v]", rf.me, server, endLogIndex)
 		rf.nextIndex[server] = max(endLogIndex+1, rf.nextIndex[server])
 		rf.matchIndex[server] = max(endLogIndex, rf.matchIndex[server])
 	} else if !isSnapshot {
@@ -185,7 +187,7 @@ func (rf *Raft) sendHeartbeat(server int, args *AppendEntriesArgs, endLogIndex i
 				rf.nextIndex[server] = reply.XIndex
 			}
 		}
-		DPrintf("%v\t失败%v Log\t%v\t参数\tXTerm:%v,XIndex:%v,XLen:%v", rf.me, server, rf.nextIndex[server], reply.XTerm, reply.XIndex, reply.XLen)
+		//DPrintf("%v\t失败%v Log\t%v\t参数\tXTerm:%v,XIndex:%v,XLen:%v", rf.me, server, rf.nextIndex[server], reply.XTerm, reply.XIndex, reply.XLen)
 	}
 	rf.commitEntryL()
 }
