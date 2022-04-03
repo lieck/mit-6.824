@@ -15,10 +15,26 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		return
 	}
 
-	DPrintf("%v\t收到心跳", rf.me)
+	//DPrintf("%v\t收到心跳", rf.me)
 	rf.electionTime = newElectionTime()
 	rf.serverType = Follower
 	rf.currentTerm = args.Term
+
+	// 不冲突，但是为延迟收到的日志
+	if rf.lastLogIndex+rf.snapshotIndex > args.PrevLogIndex+len(args.Entries) {
+		endIdx := args.PrevLogIndex + len(args.Entries) - rf.snapshotIndex
+		if len(args.Entries) >= 1 {
+			if rf.logs[endIdx].Term == args.Entries[len(args.Entries)-1].Term {
+				reply.Success = true
+				return
+			}
+		} else {
+			if rf.logs[endIdx].Term == args.PrevLogTerm {
+				reply.Success = true
+				return
+			}
+		}
+	}
 
 	// 裁剪多余的日志
 	if rf.lastLogIndex+rf.snapshotIndex > args.PrevLogIndex {
@@ -76,17 +92,10 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 }
 
 func (rf *Raft) heartbeat() {
-	// 距离上次心跳请求不到100ms不发送
-	if time.Now().UnixNano()/1e6-rf.heartbeatTime < 100 {
-		return
-	}
-
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-
-	// 持久化
-	if rf.isPersist {
-		rf.persist()
+	if rf.serverType != Leader {
+		return
 	}
 
 	rf.electionTime = newElectionTime()
@@ -129,7 +138,7 @@ func (rf *Raft) heartbeat() {
 		}
 
 		if end >= start {
-			DPrintf("%v\t往%v发送Log:\t[%v:%v]", rf.me, server, start, end)
+			//DPrintf("%v\t往%v发送Log:\t[%v:%v]", rf.me, server, start, end)
 		}
 
 		go rf.sendHeartbeat(server, &args, endLogIndex, isSnapshot)
@@ -154,7 +163,7 @@ func (rf *Raft) sendHeartbeat(server int, args *AppendEntriesArgs, endLogIndex i
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
-	if reply.Term < rf.currentTerm {
+	if reply.Term < rf.currentTerm || rf.serverType != Leader {
 		return
 	}
 

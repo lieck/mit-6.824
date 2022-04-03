@@ -92,8 +92,6 @@ type Raft struct {
 	nextIndex  []int
 	matchIndex []int
 
-	isPersist bool // 是否存在未持久化数据
-
 	// 快照
 	snapshotIndex int
 	snapshotTerm  int
@@ -226,7 +224,8 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		rf.lastLogIndex = len(rf.logs) - 1
 		rf.matchIndex[rf.me] = len(rf.logs) + rf.snapshotIndex - 1
 		index = rf.lastLogIndex + rf.snapshotIndex
-		rf.isPersist = true
+
+		rf.persist()
 
 		DPrintf("%v\tStart Entry\t%v", rf.me, index)
 		DPrintf("%v\tlastLogIndex:%v", rf.me, rf.lastLogIndex)

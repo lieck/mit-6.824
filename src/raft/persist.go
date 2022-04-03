@@ -34,7 +34,6 @@ func (rf *Raft) persist() {
 	dataSnapshot := wSnapshot.Bytes()
 
 	rf.persister.SaveStateAndSnapshot(dataState, dataSnapshot)
-	rf.isPersist = false
 }
 
 //
