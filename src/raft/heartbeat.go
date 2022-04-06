@@ -15,28 +15,35 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		return
 	}
 
-	//DPrintf("%v\t收到心跳", rf.me)
 	rf.electionTime = newElectionTime()
 	rf.serverType = Follower
 	rf.currentTerm = args.Term
 
-	// 不冲突，但是为延迟收到的日志
+	DPrintf("%v\t收到心跳", rf.me)
+
+	// 延迟收到的日志处理
 	if rf.lastLogIndex+rf.snapshotIndex > args.PrevLogIndex+len(args.Entries) {
-		endIdx := args.PrevLogIndex + len(args.Entries) - rf.snapshotIndex
-		if len(args.Entries) >= 1 {
-			if rf.logs[endIdx].Term == args.Entries[len(args.Entries)-1].Term {
+		if len(args.Entries) > 0 {
+			argsLastIndex := args.PrevLogIndex + len(args.Entries)
+			argsLastTerm := args.Entries[len(args.Entries)-1].Term
+			if rf.validationLogL(argsLastIndex, argsLastTerm) {
 				reply.Success = true
 				return
 			}
-		} else {
-			if rf.logs[endIdx].Term == args.PrevLogTerm {
-				reply.Success = true
-				return
-			}
+		} else if rf.validationLogL(args.PrevLogIndex, args.PrevLogTerm) {
+			reply.Success = true
+			return
 		}
 	}
 
-	// 裁剪多余的日志
+	// 去除与快照重复的日志
+	// 存储到快照的log一定是正确的
+	if args.PrevLogIndex < rf.snapshotIndex {
+		argsLen := rf.snapshotIndex - args.PrevLogIndex
+		args.Entries = args.Entries[argsLen:]
+		args.PrevLogIndex = rf.snapshotIndex
+	}
+	// 去除超过长度的日志
 	if rf.lastLogIndex+rf.snapshotIndex > args.PrevLogIndex {
 		rf.logs = rf.logs[0 : args.PrevLogIndex-rf.snapshotIndex+1]
 		rf.lastLogIndex = len(rf.logs) - 1
@@ -51,6 +58,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 
 	// 日志冲突
+	// if !rf.validationLogL(args.PrevLogIndex, args.PrevLogTerm) {
 	if rf.lastLogIndex > 0 && rf.logs[rf.lastLogIndex].Term != args.PrevLogTerm {
 		reply.XLen = rf.lastLogIndex + rf.snapshotIndex
 		reply.XTerm = rf.logs[rf.lastLogIndex].Term
@@ -65,8 +73,9 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		return
 	}
 
-	// 添加到logs
 	reply.Success = true
+
+	// 添加到logs
 	if args.Entries != nil {
 		DPrintf("%v\t收到Log\t[%v:%v]", rf.me, rf.lastLogIndex+1, rf.lastLogIndex+len(args.Entries))
 		for entIdx := 0; entIdx < len(args.Entries); entIdx++ {
@@ -83,7 +92,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.commitIndex = args.LeaderCommit - rf.snapshotIndex
 	}
 
-	DPrintf("%v\tlastLogIndex:%v", rf.me, rf.lastLogIndex)
+	DPrintf("%v\t收到心跳\tlastIndex:%v\tcommIdx:%v", rf.me, rf.lastLogIndex+rf.snapshotIndex, rf.commitIndex+rf.snapshotIndex)
 
 	// 应用状态机
 	if rf.commitIndex > 0 && rf.logs[rf.commitIndex].Term == rf.currentTerm && rf.lastApplied < rf.commitIndex {
@@ -114,15 +123,27 @@ func (rf *Raft) heartbeat() {
 			Entries:      nil,
 			LeaderCommit: rf.commitIndex + rf.snapshotIndex,
 		}
+
 		start := rf.nextIndex[server] - rf.snapshotIndex
 		end := rf.lastLogIndex
 
 		endLogIndex := rf.lastLogIndex + rf.snapshotIndex
 		isSnapshot := false
 
+		DPrintf("%v\t发送至%v\t[%v,%v]", rf.me, server, start, end)
+
 		if start <= 0 {
 			isSnapshot = true
-			go rf.rpcInstallSnapshot(server)
+			args := InstallSnapshotArgs{
+				Term:              rf.currentTerm,
+				LeaderId:          rf.me,
+				LastIncludedIndex: rf.snapshotIndex,
+				LastIncludedTerm:  rf.snapshotTerm,
+				Offset:            0,
+				Data:              rf.snapshotData,
+				Done:              false,
+			}
+			go rf.sendInstallSnapshot(server, &args)
 		} else {
 			if rf.lastLogIndex > 0 {
 				if start <= rf.lastLogIndex {
@@ -137,15 +158,7 @@ func (rf *Raft) heartbeat() {
 			}
 		}
 
-		if end >= start {
-			//DPrintf("%v\t往%v发送Log:\t[%v:%v]", rf.me, server, start, end)
-		}
-
 		go rf.sendHeartbeat(server, &args, endLogIndex, isSnapshot)
-
-		if rf.lastApplied < rf.commitIndex {
-			rf.condApply.Broadcast()
-		}
 	}
 }
 
@@ -197,7 +210,7 @@ func (rf *Raft) sendHeartbeat(server int, args *AppendEntriesArgs, endLogIndex i
 				rf.nextIndex[server] = idx + rf.snapshotIndex
 			} else {
 				// Logs不包含日志对应的Term
-				rf.nextIndex[server] = reply.XIndex
+				rf.nextIndex[server] = min(reply.XIndex, rf.snapshotIndex+rf.lastLogIndex+1)
 			}
 		}
 		//DPrintf("%v\t失败%v Log\t%v\t参数\tXTerm:%v,XIndex:%v,XLen:%v", rf.me, server, rf.nextIndex[server], reply.XTerm, reply.XIndex, reply.XLen)
@@ -213,8 +226,30 @@ func (rf *Raft) commitEntryL() {
 	sort.Ints(arr)
 	idx := arr[len(arr)/2] - rf.snapshotIndex
 
-	if idx > rf.commitIndex {
+	if idx > rf.commitIndex && rf.logs[idx].Term == rf.currentTerm {
 		rf.commitIndex = idx
+		rf.condApply.Broadcast()
 		DPrintf("%v\tLeader commitIndex:%v", rf.me, rf.commitIndex)
 	}
+}
+
+// 判断log[idx]是否与tarLog一致
+func (rf *Raft) validationLogL(idx int, tarTerm int) bool {
+	if idx == 0 {
+		return true
+	}
+
+	if rf.snapshotIndex == idx {
+		return rf.snapshotTerm == tarTerm
+	}
+
+	if rf.snapshotIndex > idx {
+		return true
+	}
+
+	if rf.snapshotIndex+rf.lastLogIndex < idx {
+		return false
+	}
+
+	return rf.logs[idx-rf.snapshotIndex].Term == tarTerm
 }

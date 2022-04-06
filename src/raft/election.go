@@ -13,23 +13,21 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	reply.Term = args.Term
 	rf.serverType = Follower
 
-	// 快照比较
-	if rf.snapshotTerm > args.LastLogTerm {
+	// 比较index / term
+	lastTerm := rf.snapshotTerm
+	lastIndex := rf.snapshotIndex
+	if rf.lastLogIndex >= 1 {
+		lastTerm = rf.logs[rf.lastLogIndex].Term
+		lastIndex += rf.lastLogIndex
+	}
+
+	if lastTerm > args.LastLogTerm {
 		return
-	} else if rf.snapshotTerm == args.LastLogTerm && rf.snapshotIndex > args.LastLogIndex {
+	} else if lastTerm == args.LastLogTerm && lastIndex > args.LastLogIndex {
 		return
 	}
 
-	// 日志比较
-	if rf.lastLogIndex > 0 {
-		if rf.logs[rf.lastLogIndex].Term > args.LastLogTerm {
-			return
-		}
-		if rf.logs[rf.lastLogIndex].Term == args.LastLogTerm && rf.lastLogIndex+rf.snapshotIndex > args.LastLogIndex {
-			return
-		}
-	}
-	DPrintf("%v\t投票给%v\taTerm:%v,aIdx:%v\tTerm:%v,idx:%v", rf.me, args.CandidateId, args.Term, args.LastLogIndex, rf.logs[rf.lastLogIndex].Term, rf.lastLogIndex)
+	DPrintf("%v\t投票给%v\tTerm:%v\taTerm:%v,aIdx:%v\tTerm:%v,idx:%v", rf.me, args.CandidateId, args.Term, args.LastLogTerm, args.LastLogIndex, rf.logs[rf.lastLogIndex].Term, rf.lastLogIndex)
 
 	// 投票
 	reply.VoteGranted = true
@@ -73,16 +71,12 @@ func (rf *Raft) sendElection(serverId int, args RequestVoteArgs) {
 	reply := RequestVoteReply{}
 	ok := rf.peers[serverId].Call("Raft.RequestVote", &args, &reply)
 
-	if !ok {
+	if !ok || !reply.VoteGranted {
 		return
 	}
 
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-
-	if reply.Term < args.Term {
-		return
-	}
 
 	if reply.Term > args.Term {
 		rf.serverType = Follower
@@ -95,15 +89,11 @@ func (rf *Raft) sendElection(serverId int, args RequestVoteArgs) {
 		return
 	}
 
-	if !reply.VoteGranted {
-		return
-	}
-
 	rf.votesNum += 1
 	DPrintf("%v\t收到%v的选举信息", rf.me, serverId)
 	if rf.votesNum > rf.serverNum/2 {
 		// 选举成功
-		DPrintf("%v\t获取Leader", rf.me)
+		DPrintf("%v\t获取Leader\tlastIndex:%v", rf.me, rf.lastLogIndex+rf.snapshotIndex+1)
 		rf.serverType = Leader
 		for i := 0; i < rf.serverNum; i++ {
 			rf.matchIndex[i] = 0

@@ -96,6 +96,7 @@ type Raft struct {
 	snapshotIndex int
 	snapshotTerm  int
 	snapshotData  []byte
+	snapshotIs    bool
 }
 
 // GetState return currentTerm and whether this server
@@ -123,40 +124,56 @@ func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int,
 	return true
 }
 
-func (rf *Raft) apply(index int, logs []Entry) {
-	DPrintf("%v\t应用状态机\t[%v:%v]", rf.me, index, index+len(logs)-1)
-	for i, val := range logs {
-		rf.applyCh <- ApplyMsg{
-			CommandValid: true,
-			Command:      val.Command,
-			CommandIndex: i + index,
-		}
-	}
-}
-
 func (rf *Raft) applyEd() {
+	go func() {
+		for rf.killed() == false {
+			rf.condApply.Broadcast()
+			time.Sleep(50 * time.Millisecond)
+		}
+	}()
+
+	rf.muApply.Lock()
+	defer rf.muApply.Unlock()
+
 	for rf.killed() == false {
 		rf.mu.Lock()
-
 		start := rf.lastApplied + 1
 		logs := make([]Entry, 0)
+		msg := ApplyMsg{SnapshotValid: false}
 
-		if rf.lastApplied < rf.commitIndex && rf.logs[rf.commitIndex].Term == rf.currentTerm {
+		if rf.snapshotIs {
+			// 发送快照
+			msg = ApplyMsg{
+				SnapshotValid: true,
+				Snapshot:      rf.snapshotData,
+				SnapshotTerm:  rf.currentTerm,
+				SnapshotIndex: rf.snapshotIndex,
+			}
+			rf.snapshotIs = false
+		} else if rf.lastApplied < rf.commitIndex {
+			// 发送Log
 			for i := start; i <= rf.commitIndex; i++ {
 				logs = append(logs, rf.logs[i])
 				rf.lastApplied++
 			}
 		}
-
 		rf.mu.Unlock()
 
 		if len(logs) >= 1 {
-			rf.apply(start, logs)
+			index := start + rf.snapshotIndex
+			DPrintf("%v\t应用状态机\t[%v:%v]", rf.me, index, index+len(logs)-1)
+			for i, val := range logs {
+				rf.applyCh <- ApplyMsg{
+					CommandValid: true,
+					Command:      val.Command,
+					CommandIndex: i + index,
+				}
+			}
+		} else if msg.SnapshotValid != false {
+			rf.applyCh <- msg
 		}
 
-		rf.muApply.Lock()
 		rf.condApply.Wait()
-		rf.muApply.Unlock()
 	}
 }
 
@@ -322,10 +339,13 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.lastApplied = 0
 	rf.lastLogIndex = 0
 	rf.snapshotTerm = 0
+	rf.snapshotIndex = 0
+	rf.snapshotIs = false
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 	rf.readSnapshot(persister.ReadSnapshot())
+	DPrintf("%v\t重启服务", rf.me)
 
 	// start ticker goroutine to start elections
 	go rf.ticker()
