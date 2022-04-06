@@ -2,7 +2,6 @@ package raft
 
 import (
 	"sort"
-	"time"
 )
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
@@ -18,6 +17,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.electionTime = newElectionTime()
 	rf.serverType = Follower
 	rf.currentTerm = args.Term
+	rf.leaderId = args.LeaderId
 
 	DPrintf("%v\t收到心跳", rf.me)
 
@@ -108,7 +108,6 @@ func (rf *Raft) heartbeat() {
 	}
 
 	rf.electionTime = newElectionTime()
-	rf.heartbeatTime = time.Now().UnixNano() / 1e6
 
 	for server := range rf.peers {
 		if server == rf.me {
@@ -165,11 +164,10 @@ func (rf *Raft) heartbeat() {
 func (rf *Raft) sendHeartbeat(server int, args *AppendEntriesArgs, endLogIndex int, isSnapshot bool) {
 	reply := AppendEntriesReply{}
 
-	start := time.Now().UnixNano() / 1e6
 	//DPrintf("%v\t发送心跳至%v", rf.me, server)
 
 	ok := rf.peers[server].Call("Raft.AppendEntries", args, &reply)
-	if !ok || time.Now().UnixNano()/1e6-start >= 100 {
+	if !ok || isSnapshot {
 		return
 	}
 
@@ -190,7 +188,8 @@ func (rf *Raft) sendHeartbeat(server int, args *AppendEntriesArgs, endLogIndex i
 		//DPrintf("%v\t确认%v Log\t[1:%v]", rf.me, server, endLogIndex)
 		rf.nextIndex[server] = max(endLogIndex+1, rf.nextIndex[server])
 		rf.matchIndex[server] = max(endLogIndex, rf.matchIndex[server])
-	} else if !isSnapshot {
+		rf.commitEntryL()
+	} else {
 		if reply.XTerm == -1 {
 			// 不冲突，但是缺少部分日志
 			rf.nextIndex[server] = reply.XLen + 1
@@ -207,15 +206,16 @@ func (rf *Raft) sendHeartbeat(server int, args *AppendEntriesArgs, endLogIndex i
 				rf.nextIndex[server] = 1
 			} else if rf.logs[idx].Term == reply.XTerm {
 				// Logs包含日志对应的Term
-				rf.nextIndex[server] = idx + rf.snapshotIndex
+				// rf.nextIndex[server] = idx + rf.snapshotIndex
+				rf.nextIndex[server] = idx + rf.snapshotIndex + 1
 			} else {
 				// Logs不包含日志对应的Term
-				rf.nextIndex[server] = min(reply.XIndex, rf.snapshotIndex+rf.lastLogIndex+1)
+				// rf.nextIndex[server] = min(reply.XIndex, rf.snapshotIndex+rf.lastLogIndex+1)
+				rf.nextIndex[server] = reply.XIndex
 			}
 		}
 		//DPrintf("%v\t失败%v Log\t%v\t参数\tXTerm:%v,XIndex:%v,XLen:%v", rf.me, server, rf.nextIndex[server], reply.XTerm, reply.XIndex, reply.XLen)
 	}
-	rf.commitEntryL()
 }
 
 func (rf *Raft) commitEntryL() {

@@ -74,12 +74,12 @@ type Raft struct {
 
 	applyCh chan ApplyMsg
 
+	leaderId int
+
 	serverType   int   // 服务器类型
 	electionTime int64 // 选举超时时间
 	votesNum     int   // 投票数量
 	serverNum    int   // 集群服务器数量
-
-	heartbeatTime int64
 
 	currentTerm int
 	votedFor    int
@@ -113,6 +113,12 @@ func (rf *Raft) GetState() (int, bool) {
 	rf.mu.Unlock()
 
 	return term, isleader
+}
+
+func (rf *Raft) getLeaderId() int {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	return rf.leaderId
 }
 
 // CondInstallSnapshot
@@ -341,6 +347,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.snapshotTerm = 0
 	rf.snapshotIndex = 0
 	rf.snapshotIs = false
+
+	rf.leaderId = -1
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())

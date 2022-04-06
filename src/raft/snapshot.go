@@ -43,7 +43,7 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 
 	rf.currentTerm = args.Term
 	rf.serverType = Follower
-	// rf.electionTime = newElectionTime()
+	rf.electionTime = newElectionTime()
 
 	// 是否需要快照
 	if rf.snapshotIndex+rf.commitIndex >= args.LastIncludedIndex {

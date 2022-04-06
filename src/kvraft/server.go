@@ -108,7 +108,6 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// 轮询判断
 	kv.applyMu.Lock()
 	for {
-		//time.Sleep(65 * time.Millisecond)
 		kv.applyCond.Wait()
 
 		if kv.rs.Get(args.ClientId, args.RequestId) == 2 {
