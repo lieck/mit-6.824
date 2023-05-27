@@ -1,13 +1,11 @@
 package paxos
 
-import log "github.com/sirupsen/logrus"
-
 // ProposeHandler Acceptor
 func (px *Paxos) ProposeHandler(args *ProposeArgs, reply *ProposeReply) error {
 	px.mu.Lock()
 	defer px.mu.Unlock()
 
-	reply.Commit = &CommitReply{}
+	reply.Commit = &DecidedReply{}
 	_ = px.decidedHandlerL(args.Commit, reply.Commit)
 	_ = px.proposeHandlerL(args, reply)
 	return nil
@@ -15,30 +13,23 @@ func (px *Paxos) ProposeHandler(args *ProposeArgs, reply *ProposeReply) error {
 
 // proposeHandlerL 的处理函数。
 func (px *Paxos) proposeHandlerL(args *ProposeArgs, reply *ProposeReply) error {
-	// seq 为 Done
-	if args.Seq <= px.peerDoneSeq[px.me] {
-		reply.Status = Forgotten
-		reply.Reject = true
-		return nil
-	}
 
 	if info, ok := px.proposeMap[args.Seq]; ok {
 		reply.Rnd = info.rnd
 
 		// 存在值
-		if info.accept.Value != nil {
-			reply.accept = info.accept
+		if info.accept != nil {
+			reply.Accept = info.accept
 		}
 
-		// 优化：值已经选定，直接返回，通知 proposer 不进行后续的处理
-		if info.status == Decided {
-			reply.Status = Decided
-			return nil
-		}
-		reply.Status = Pending
+		// TODO 优化：值已经选定，直接返回，通知 proposer 不进行后续的处理
+		//if info.status == Decided {
+		//	reply.Status = Decided
+		//	return nil
+		//}
 
-		// args.rnd >= highest_rnd 时更新 rnd，否则拒绝
-		if args.Rnd.Ge(&info.rnd) {
+		// args.rnd > highest_rnd 时更新 rnd，否则拒绝
+		if args.Rnd.Gt(&info.rnd) {
 			info.rnd = args.Rnd
 		} else {
 			reply.Reject = true
@@ -48,17 +39,14 @@ func (px *Paxos) proposeHandlerL(args *ProposeArgs, reply *ProposeReply) error {
 		// 不存在 seq 创建信息
 		px.proposeMap[args.Seq] = &ProposeInfo{
 			status: Pending,
-			accept: Data{
-				Seq:   args.Seq,
-				Rnd:   args.Rnd,
-				Value: nil,
-			},
-			start: false,
+			accept: nil,
+			start:  false,
+			rnd:    args.Rnd,
 		}
-		reply.Status = Pending
 	}
 
-	log.Debugf("[%v]proposeHandler send:%v\tSeq: %v\trnd:%v\treject:%v", px.me, args.ServerId, args.Seq, reply.Rnd, reply.Reject)
+	reply.Status = Pending
+	DPrintf("[%v]proposeHandler\tseq[%v]\treply_rnd=%v\treject=%v\tvalue:%v\n", px.me, args.Seq, reply.Rnd, reply.Reject, reply.Accept)
 	return nil
 }
 
@@ -67,7 +55,7 @@ func (px *Paxos) AcceptHandler(args *AcceptArgs, reply *AcceptReply) error {
 	px.mu.Lock()
 	defer px.mu.Unlock()
 
-	reply.Commit = &CommitReply{}
+	reply.Commit = &DecidedReply{}
 	_ = px.decidedHandlerL(args.Commit, reply.Commit)
 	_ = px.acceptHandlerL(args, reply)
 	return nil
@@ -82,6 +70,7 @@ func (px *Paxos) acceptHandlerL(args *AcceptArgs, reply *AcceptReply) error {
 
 	if info, ok := px.proposeMap[args.Seq]; ok {
 		reply.Rnd = info.rnd
+		// 接受大于等于 rnd 的信息
 		if args.Rnd.Ge(&info.rnd) {
 			info.rnd = args.Rnd
 			info.accept = args.Accept
@@ -89,6 +78,7 @@ func (px *Paxos) acceptHandlerL(args *AcceptArgs, reply *AcceptReply) error {
 			reply.Reject = true
 		}
 	} else {
+		// 不存在创建对应信息
 		px.proposeMap[args.Seq] = &ProposeInfo{
 			status: Pending,
 			rnd:    args.Rnd,
@@ -101,13 +91,13 @@ func (px *Paxos) acceptHandlerL(args *AcceptArgs, reply *AcceptReply) error {
 }
 
 // DecidedHandler Acceptor
-func (px *Paxos) DecidedHandler(args *CommitArgs, reply *CommitReply) error {
+func (px *Paxos) DecidedHandler(args *DecidedArgs, reply *DecidedReply) error {
 	px.mu.Lock()
 	defer px.mu.Unlock()
 	return px.decidedHandlerL(args, reply)
 }
 
-func (px *Paxos) decidedHandlerL(args *CommitArgs, reply *CommitReply) error {
+func (px *Paxos) decidedHandlerL(args *DecidedArgs, reply *DecidedReply) error {
 	for _, data := range args.Data {
 		if data.Seq <= px.peerDoneSeq[px.me] {
 			continue
@@ -116,17 +106,16 @@ func (px *Paxos) decidedHandlerL(args *CommitArgs, reply *CommitReply) error {
 		info, ok := px.proposeMap[data.Seq]
 		if ok {
 			if info.status == Pending {
-				info.accept = *data
+				info.accept = data
 				info.status = Decided
-				log.Debugf("[%v]Decided Seq: %v\n", px.me, data.Seq)
 			}
 		} else {
 			px.proposeMap[data.Seq] = &ProposeInfo{
+				rnd:    args.Rnd,
 				status: Decided,
-				accept: *data,
+				accept: data,
 				start:  false,
 			}
-			log.Debugf("[%v]Decided Seq: %v\n", px.me, data.Seq)
 		}
 	}
 

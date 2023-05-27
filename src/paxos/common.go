@@ -42,7 +42,7 @@ type Data struct {
 type ProposeInfo struct {
 	status Fate
 	rnd    Round // highest prepare seen
-	accept Data  // highest accept seen
+	accept *Data // highest accept seen
 	start  bool  // 表示是否协程启动了提议
 }
 
@@ -51,40 +51,45 @@ type ProposeArgs struct {
 	Seq      int // Paxos 实例
 	Rnd      Round
 
-	Commit *CommitArgs
+	Commit *DecidedArgs
 }
 
 type ProposeReply struct {
 	Reject bool
 	Rnd    Round
-	accept Data
+	Accept *Data
 	Status Fate // Value 状态
 
-	Commit *CommitReply
+	Commit *DecidedReply
 }
 
 type AcceptArgs struct {
-	Seq    int
-	Rnd    Round
-	Accept Data
+	ServerId int
+	Seq      int
+	Rnd      Round
 
-	Commit *CommitArgs
+	Accept *Data
+
+	Commit *DecidedArgs
 }
 
 type AcceptReply struct {
 	Reject bool
 	Rnd    Round
-	Commit *CommitReply
+
+	Commit *DecidedReply
 }
 
-type CommitArgs struct {
+type DecidedArgs struct {
 	ServerId int
+	Rnd      Round
 	Data     []*Data // 数据
-	MaxSeq   int     // 已知的最大 Seq
-	DoneSeq  int     // 当前最小未完成提议的 Seq
+
+	MaxSeq  int // 已知的最大 Seq
+	DoneSeq int // 当前最小未完成提议的 Seq
 }
 
-type CommitReply struct {
+type DecidedReply struct {
 	ServerId int
 	MaxSeq   int // 已知的最大 Seq
 	DoneSeq  int // 当前最小未完成提议的 Seq

@@ -21,6 +21,7 @@ package paxos
 //
 
 import (
+	"log"
 	"net"
 )
 import "net/rpc"
@@ -31,7 +32,6 @@ import "sync"
 import "sync/atomic"
 import "fmt"
 import "math/rand"
-import log "github.com/sirupsen/logrus"
 
 // Fate px.Status() return values, indicating
 // whether an agreement has been decided,
@@ -44,6 +44,15 @@ const (
 	Pending        // not yet decided.
 	Forgotten      // decided but forgotten.
 )
+
+const Debug = 1
+
+func DPrintf(format string, a ...interface{}) {
+	if Debug > 0 {
+		log.Printf(format, a...)
+	}
+	return
+}
 
 type Paxos struct {
 	mu         sync.Mutex
@@ -59,10 +68,10 @@ type Paxos struct {
 	proposeMap map[int]*ProposeInfo
 	peerNum    int
 
-	maxSeq            int     // 已知最大的 Seq
-	maxDecidedSeq     int     // 当前完成最大的 Seq
-	peerDoneSeq       []int   // 完成的 Seq
-	lastHeartbeatTime []int64 // 上一次发送心跳 RPC 的时间
+	forgottenSeq  int   // 遗忘的 Seq
+	maxSeq        int   // 已知最大的 Seq
+	maxDecidedSeq int   // 当前完成最大的 Seq
+	peerDoneSeq   []int // 完成的 Seq
 }
 
 // call() sends an RPC to the rpcname handler on server srv
@@ -84,7 +93,7 @@ func call(srv string, name string, args interface{}, reply interface{}) bool {
 	if err != nil {
 		err1 := err.(*net.OpError)
 		if err1.Err != syscall.ENOENT && err1.Err != syscall.ECONNREFUSED {
-			fmt.Printf("paxos Dial() failed: %v\n", err1)
+			// fmt.Printf("paxos Dial() failed: %v\n", err1)
 		}
 		return false
 	}
@@ -130,7 +139,7 @@ func (px *Paxos) Start(seq int, v interface{}) {
 	} else {
 		info = &ProposeInfo{
 			status: Pending,
-			accept: Data{},
+			accept: nil,
 			start:  true,
 		}
 		px.proposeMap[seq] = info
@@ -144,14 +153,14 @@ func (px *Paxos) Start(seq int, v interface{}) {
 
 // Proposer 发起提议
 // 返回其他节点的最大 rnd 及其对应的 value（如果有的话），当前提议状态，该阶段是否成功
-func (px *Paxos) proposePhase(args *ProposeArgs) (Round, interface{}, Fate, bool) {
+func (px *Paxos) proposePhase(args *ProposeArgs) (Round, *Data, Fate, bool) {
 	var highestRnd Round
-	var accept Data
+	var accept *Data
 
 	ch := make(chan *ProposeReply, px.peerNum)
 
 	px.mu.Lock()
-	args.Commit = &CommitArgs{
+	args.Commit = &DecidedArgs{
 		ServerId: px.me,
 		MaxSeq:   px.maxSeq,
 		DoneSeq:  px.peerDoneSeq[px.me],
@@ -173,10 +182,11 @@ func (px *Paxos) proposePhase(args *ProposeArgs) (Round, interface{}, Fate, bool
 
 					if reply.Status == Decided {
 						// 直接应用状态机
-						info := px.proposeMap[args.Seq]
-						if info.status == Pending {
-							info.status = Decided
-							info.accept = reply.accept
+						if info, ok := px.proposeMap[args.Seq]; ok {
+							if info.status == Pending {
+								info.status = Decided
+								info.accept = reply.Accept
+							}
 						}
 					}
 
@@ -200,13 +210,15 @@ func (px *Paxos) proposePhase(args *ProposeArgs) (Round, interface{}, Fate, bool
 			failingCount++
 		} else {
 			// Seq 已经被确认
-			if reply.Status != Pending {
-				return highestRnd, accept, reply.Status, false
-			}
+			//if reply.Status != Pending {
+			//	return highestRnd, reply.Accept.Value, reply.Status, false
+			//}
 
 			// 选择轮次最高的值
-			if reply.accept.Value != nil && reply.accept.Rnd.Gt(&accept.Rnd) {
-				accept = reply.accept
+			if reply.Accept != nil {
+				if accept == nil || reply.Accept.Rnd.Ge(&accept.Rnd) {
+					accept = reply.Accept
+				}
 			}
 
 			// 选择当前最高的轮次
@@ -222,7 +234,7 @@ func (px *Paxos) proposePhase(args *ProposeArgs) (Round, interface{}, Fate, bool
 		}
 
 		if failingCount >= px.quorum || succeedCount >= px.quorum {
-			return highestRnd, accept.Value, Pending, succeedCount >= px.quorum
+			return highestRnd, accept, Pending, succeedCount >= px.quorum
 		}
 	}
 }
@@ -234,7 +246,7 @@ func (px *Paxos) acceptPhase(args *AcceptArgs) (Round, bool) {
 	ch := make(chan *AcceptReply, px.peerNum)
 
 	px.mu.Lock()
-	args.Commit = &CommitArgs{
+	args.Commit = &DecidedArgs{
 		ServerId: px.me,
 		MaxSeq:   px.maxSeq,
 		DoneSeq:  px.peerDoneSeq[px.me],
@@ -242,7 +254,7 @@ func (px *Paxos) acceptPhase(args *AcceptArgs) (Round, bool) {
 
 	for i, peer := range px.peers {
 		reply := &AcceptReply{
-			Commit: &CommitReply{},
+			Commit: &DecidedReply{},
 		}
 		if i == px.me {
 			_ = px.acceptHandlerL(args, reply)
@@ -291,7 +303,7 @@ func (px *Paxos) acceptPhase(args *AcceptArgs) (Round, bool) {
 	}
 }
 
-func (px *Paxos) commitPhase(args *CommitArgs) {
+func (px *Paxos) commitPhase(args *DecidedArgs) {
 	// Commit
 	px.mu.Lock()
 	defer px.mu.Unlock()
@@ -302,7 +314,7 @@ func (px *Paxos) commitPhase(args *CommitArgs) {
 
 	// 发送 Commit Msg
 	for id, peer := range px.peers {
-		reply := &CommitReply{}
+		reply := &DecidedReply{}
 		if id == px.me {
 			_ = px.decidedHandlerL(args, reply)
 		}
@@ -324,10 +336,11 @@ func (px *Paxos) propose(seq int, v interface{}) {
 		N:        0,
 		ServerId: px.me,
 	}
+	var accept *Data
 
 	for !px.isdead() {
 		rnd.N++
-		log.Debugf("[%v]propose seq:%v\trnd:%v\n", px.me, seq, rnd)
+		DPrintf("[%v]proposal seq[%v]", px.me, seq)
 
 		// Phase-1
 		proposeArgs := &ProposeArgs{
@@ -335,42 +348,49 @@ func (px *Paxos) propose(seq int, v interface{}) {
 			Seq:      seq,
 			Rnd:      rnd,
 		}
-		r, val, status, ok := px.proposePhase(proposeArgs)
+		replyRnd, replyAccept, _, ok := px.proposePhase(proposeArgs)
 
-		// 提议已经完成
-		if status != Pending {
-			break
-		}
+		// TODO 提议已经完成
+		//if status != Pending {
+		//	v = val
+		//	break
+		//}
 
 		// 提议失败, 选择当前已知最大的 rnd 重新提议
 		if !ok {
-			if r.Ge(&rnd) {
-				rnd = r
+			if replyRnd.Ge(&rnd) {
+				rnd = replyRnd
 			}
 			continue
 		}
 
-		// 若存在值则选择已经存在的值
-		if val != nil {
-			v = val
-		}
-
-		// Phase-2
-		acceptArgs := &AcceptArgs{
-			Seq: seq,
-			Rnd: rnd,
-			Accept: Data{
+		if replyAccept != nil {
+			// 若存在值则选择已经存在的值
+			accept = replyAccept
+			accept.Rnd = rnd
+		} else {
+			// 否则选择自己的值
+			accept = &Data{
 				Seq:   seq,
 				Rnd:   rnd,
 				Value: v,
-			},
+			}
+		}
+
+		DPrintf("[%v]accept seq[%v]\trnd:%v\taccept:%v\n", px.me, seq, rnd, accept)
+
+		// Phase-2
+		acceptArgs := &AcceptArgs{
+			Seq:    seq,
+			Rnd:    rnd,
+			Accept: accept,
 		}
 
 		// 提议失败, 选择当前已知最大的 rnd 重新提议
-		r, ok = px.acceptPhase(acceptArgs)
+		replyRnd, ok = px.acceptPhase(acceptArgs)
 		if !ok {
-			if r.Ge(&rnd) {
-				rnd = r
+			if replyRnd.Ge(&rnd) {
+				rnd = replyRnd
 			}
 			continue
 		}
@@ -378,17 +398,13 @@ func (px *Paxos) propose(seq int, v interface{}) {
 		break
 	}
 
-	log.Debugf("[%v]proposeAcc seq:%v\trnd:%v\n", px.me, seq, rnd)
-
+	DPrintf("[%v]decided seq[%v]\trnd:%v\taccept:%v\n", px.me, seq, rnd, accept)
 	// Phase-3
-	px.commitPhase(&CommitArgs{
+	px.commitPhase(&DecidedArgs{
+		Rnd:      rnd,
 		ServerId: px.me,
 		Data: []*Data{
-			{
-				Seq:   seq,
-				Rnd:   rnd,
-				Value: v,
-			},
+			accept,
 		},
 	})
 }
@@ -402,20 +418,19 @@ func (px *Paxos) Done(seq int) {
 	px.mu.Lock()
 	defer px.mu.Unlock()
 
-	px.doneL(seq)
+	px.peerDoneSeq[px.me] = seq
 }
 
-func (px *Paxos) doneL(seq int) {
-	if seq <= px.peerDoneSeq[px.me] {
+// 遗忘 Seq 及其之前的 Paxos 实例
+func (px *Paxos) forgotten(seq int) {
+	if seq <= px.forgottenSeq {
 		return
 	}
 
-	for s := px.peerDoneSeq[px.me]; s <= seq; s++ {
+	for s := px.forgottenSeq; s <= seq; s++ {
 		delete(px.proposeMap, s)
 	}
-
-	px.peerDoneSeq[px.me] = seq
-
+	px.forgottenSeq = seq
 }
 
 // Max the application wants to know the
@@ -458,9 +473,15 @@ func (px *Paxos) Min() int {
 	// You code here.
 	px.mu.Lock()
 	defer px.mu.Unlock()
+
+	// 获取已完成的最小实例
 	minSeq := px.peerDoneSeq[0]
 	for _, s := range px.peerDoneSeq {
 		minSeq = min(minSeq, s)
+	}
+
+	if minSeq != px.forgottenSeq {
+		px.forgotten(minSeq)
 	}
 
 	return minSeq + 1
@@ -482,6 +503,10 @@ func (px *Paxos) Status(seq int) (Fate, interface{}) {
 	info, ok := px.proposeMap[seq]
 	if !ok {
 		return Pending, nil
+	}
+
+	if info.status == Decided {
+		return Decided, info.accept.Value
 	}
 
 	return info.status, nil
@@ -524,24 +549,18 @@ func Make(peers []string, me int, rpcs *rpc.Server) *Paxos {
 	px.me = me
 
 	// Your initialization code here.
-	//log.SetLevel(log.DebugLevel)
-	//log.SetFormatter(&log.TextFormatter{
-	//	ForceColors: true,
-	//})
-
 	px.peerNum = len(peers)
 	px.quorum = (px.peerNum + 1) >> 1
 	px.proposeMap = make(map[int]*ProposeInfo)
 
 	px.maxSeq = -1
 	px.maxDecidedSeq = -1
+	px.forgottenSeq = -1
 
 	px.peerDoneSeq = make([]int, px.peerNum)
 	for i := 0; i < px.peerNum; i++ {
 		px.peerDoneSeq[i] = -1
 	}
-
-	px.lastHeartbeatTime = make([]int64, px.peerNum)
 
 	if rpcs != nil {
 		// caller will create socket &c
@@ -588,7 +607,7 @@ func Make(peers []string, me int, rpcs *rpc.Server) *Paxos {
 					conn.Close()
 				}
 				if err != nil && px.isdead() == false {
-					fmt.Printf("Paxos(%v) accept: %v\n", me, err.Error())
+					// fmt.Printf("Paxos(%v) accept: %v\n", me, err.Error())
 				}
 			}
 		}()
