@@ -23,6 +23,7 @@ package paxos
 import (
 	"log"
 	"net"
+	"time"
 )
 import "net/rpc"
 
@@ -45,7 +46,7 @@ const (
 	Forgotten      // decided but forgotten.
 )
 
-const Debug = 1
+const Debug = 0
 
 func DPrintf(format string, a ...interface{}) {
 	if Debug > 0 {
@@ -174,6 +175,7 @@ func (px *Paxos) proposePhase(args *ProposeArgs) (Round, *Data, Fate, bool) {
 		} else {
 			go func(id int, peer string) {
 				ok := call(peer, "Paxos.ProposeHandler", args, reply)
+
 				if !ok {
 					reply = nil
 				} else {
@@ -204,7 +206,11 @@ func (px *Paxos) proposePhase(args *ProposeArgs) (Round, *Data, Fate, bool) {
 	failingCount := 0
 	succeedCount := 0
 	for {
-		reply := <-ch
+		var reply *ProposeReply
+		select {
+		case reply = <-ch:
+		case <-time.After(500 * time.Millisecond):
+		}
 
 		if reply == nil {
 			failingCount++
@@ -280,7 +286,12 @@ func (px *Paxos) acceptPhase(args *AcceptArgs) (Round, bool) {
 	failingCount := 0
 	succeedCount := 0
 	for {
-		reply := <-ch
+		var reply *AcceptReply
+		select {
+		case reply = <-ch:
+		case <-time.After(500 * time.Millisecond):
+		}
+
 		if reply == nil {
 			failingCount++
 		} else {
@@ -361,6 +372,7 @@ func (px *Paxos) propose(seq int, v interface{}) {
 			if replyRnd.Ge(&rnd) {
 				rnd = replyRnd
 			}
+			time.Sleep(time.Duration(rand.Int31n(50)) * time.Millisecond)
 			continue
 		}
 
@@ -392,21 +404,22 @@ func (px *Paxos) propose(seq int, v interface{}) {
 			if replyRnd.Ge(&rnd) {
 				rnd = replyRnd
 			}
+			time.Sleep(time.Duration(rand.Int31n(50)) * time.Millisecond)
 			continue
 		}
 
+		DPrintf("[%v]decided seq[%v]\trnd:%v\taccept:%v\n", px.me, seq, rnd, accept)
+
+		// Phase-3
+		px.commitPhase(&DecidedArgs{
+			Rnd:      rnd,
+			ServerId: px.me,
+			Data: []*Data{
+				accept,
+			},
+		})
 		break
 	}
-
-	DPrintf("[%v]decided seq[%v]\trnd:%v\taccept:%v\n", px.me, seq, rnd, accept)
-	// Phase-3
-	px.commitPhase(&DecidedArgs{
-		Rnd:      rnd,
-		ServerId: px.me,
-		Data: []*Data{
-			accept,
-		},
-	})
 }
 
 // Done the application on this machine is done with
@@ -509,7 +522,7 @@ func (px *Paxos) Status(seq int) (Fate, interface{}) {
 		return Decided, info.accept.Value
 	}
 
-	return info.status, nil
+	return Pending, nil
 }
 
 // Kill tell the peer to shut itself down.

@@ -64,7 +64,7 @@ func (px *Paxos) AcceptHandler(args *AcceptArgs, reply *AcceptReply) error {
 // Acceptor 请求处理函数.
 func (px *Paxos) acceptHandlerL(args *AcceptArgs, reply *AcceptReply) error {
 	if args.Seq <= px.peerDoneSeq[px.me] {
-		reply.Reject = true
+		reply.Reject = false
 		return nil
 	}
 
@@ -87,6 +87,7 @@ func (px *Paxos) acceptHandlerL(args *AcceptArgs, reply *AcceptReply) error {
 		}
 	}
 
+	DPrintf("[%v]acceptHandler seq[%v]\trnd=%V\treject=%v\n", px.me, args.Seq, reply.Rnd, reply.Reject)
 	return nil
 }
 
