@@ -66,16 +66,17 @@ type KVPaxos struct {
 
 	// Your definitions here.
 	kv            map[string]string
-	logMap        map[int64]*Op
+	logMap        map[int]*Op
 	requestFilter map[int64]int // 过滤器, 表示 Client 已经处理完成的请求 Seq
-	lastApplySeq  atomic.Int64  // 最后应用的 Paxos 实例
+	lastApplySeq  atomic.Value  // 最后应用的 Paxos 实例
+	lastWaitSeq   int
 }
 
 func (kv *KVPaxos) Get(args *GetArgs, reply *GetReply) error {
 	// Your code here.
 
-	kv.mu.Lock()
 	// 请求过滤
+	kv.mu.Lock()
 	if clientSeq, ok := kv.requestFilter[args.ClientId]; ok && clientSeq >= args.RequestSeq {
 		if val, ok := kv.kv[args.Key]; ok {
 			reply.Value = val
@@ -95,6 +96,7 @@ func (kv *KVPaxos) Get(args *GetArgs, reply *GetReply) error {
 
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
+
 	// Paxos 完成, 获取值
 	if val, ok := kv.kv[args.Key]; ok {
 		reply.Value = val
@@ -121,6 +123,7 @@ func (kv *KVPaxos) PutAppend(args *PutAppendArgs, reply *PutAppendReply) error {
 		ClientId:   args.ClientId,
 		RequestSeq: args.RequestSeq,
 	}
+
 	kv.startPropose(op)
 	return nil
 }
@@ -134,89 +137,99 @@ func (kv *KVPaxos) opFilterL(op *Op) bool {
 	return false
 }
 
+// 开始提议并等待日志应用
+// 1. 获取 px.max + 1 作为 seq 提议
+// 2. 若小于 seq 未启动协程监听并应用，则启用新的协程获取并应用
+// 3. 等待 seq 提议完成并应用
+// 4. 若应用的 seq 与提议的不一致，重试
 func (kv *KVPaxos) startPropose(op *Op) {
 	for !kv.isdead() {
+		kv.mu.Lock()
+		// 1. 获取 px.max + 1 作为 seq 提议
 		seq := kv.px.Max() + 1
-		kv.px.Start(seq, op)
+		kv.px.Start(seq, *op)
+		DPrintf("[%v]startPropose\tseq[%v]\top=%v\tkey=%v\tval=%v\n", kv.me, seq, op.Op, op.Key, op.Value)
 
-		// 等待 paxos 提议
-		getOp := kv.waitPropose(seq)
-		kv.applyLog(int64(seq), getOp)
+		// 2. 若小于 seq 未启动协程监听并应用，则启用新的协程获取并应用
+		if kv.lastWaitSeq+1 < seq {
+			lastWaitSeq := kv.lastWaitSeq + 1
+			go kv.getProposeApply(lastWaitSeq, seq)
+		}
+		// 更新最后监听的 seq
+		kv.lastWaitSeq = seq
+		kv.mu.Unlock()
 
-		// 表示需要重新提议
-		if getOp == nil || !getOp.Eq(op) {
+		// 3. 等待 seq 提议完成并应用
+		replyOp := kv.waitPropose(seq)
+		applyOk := kv.applyLog(seq, replyOp)
+
+		// 4. 若应用的 seq 与提议的不一致，重试
+		if replyOp == nil || !replyOp.Eq(op) {
 			continue
 		}
 
-		// 等待应用
-		kv.waitApplySeq(int64(seq))
+		if !applyOk {
+			// 日志应用未成功，等待完成应用
+			kv.waitApply(seq)
+		}
+
 		break
 	}
 }
 
-// 从 paxos 中获取提议成功的日志
+// 等待并获取 paxos 中获取提议成功的日志
 func (kv *KVPaxos) waitPropose(seq int) *Op {
 	// 等待 paxos 提议
 	to := 10 * time.Millisecond
 	for {
 		status, value := kv.px.Status(seq)
 		if status == paxos.Decided {
-			value, ok := (value).(*Op)
+			value, ok := (value).(Op)
 			if ok {
-				return value
+				return &value
 			}
 			return nil
 		}
 		time.Sleep(to)
-		if to < 10*time.Second {
+		if to < 1*time.Second {
 			to *= 2
 		}
 	}
 }
 
-func (kv *KVPaxos) waitApplySeq(seq int64) {
-	// 等待应用
+// 等待 seq 应用成功, 即循环判断 lastApplySeq >= seq
+func (kv *KVPaxos) waitApply(seq int) {
 	to := 10 * time.Millisecond
-	isRetry := false
-
 	for {
-		currDoneSeq := kv.lastApplySeq.Load()
-
-		// 应用成功
-		if currDoneSeq >= seq {
+		if kv.lastApplySeq.Load().(int) >= seq {
 			return
 		}
-
-		// 超过等待时间，重启之前的提议，并且监听之前请求的完成
-		if !isRetry && to >= 300*time.Millisecond {
-			isRetry = true
-			kv.retryPaxos(seq)
-		}
-
 		time.Sleep(to)
-		if to < 10*time.Second {
+		if to < 1*time.Second {
 			to *= 2
 		}
 	}
 }
 
 // 应用日志操作
-func (kv *KVPaxos) applyLog(seq int64, op *Op) {
+func (kv *KVPaxos) applyLog(seq int, op *Op) bool {
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
 
-	if seq != kv.lastApplySeq.Load()+1 {
+	if seq != kv.lastApplySeq.Load().(int)+1 {
 		// 不可以应用
 		kv.logMap[seq] = op
-		return
+		return false
 	}
 
 	// 可以直接应用
 	if op != nil && !kv.opFilterL(op) {
 		if op.Op == Put {
 			kv.kv[op.Key] = op.Value
+			DPrintf("[%v]applyLog seq[%v] put %v=%v", kv.me, seq, op.Key, op.Value)
 		} else if op.Op == Append {
 			kv.kv[op.Key] += op.Value
+			DPrintf("[%v]applyLog seq[%v] append %v=%v", kv.me, seq, op.Key, op.Value)
 		}
 		kv.requestFilter[op.ClientId] = op.RequestSeq
 	}
@@ -228,8 +241,10 @@ func (kv *KVPaxos) applyLog(seq int64, op *Op) {
 			if op != nil && !kv.opFilterL(op) {
 				if op.Op == Put {
 					kv.kv[op.Key] = op.Value
+					DPrintf("[%v]applyLog seq[%v] put %v=%v", kv.me, seq, op.Key, op.Value)
 				} else if op.Op == Append {
 					kv.kv[op.Key] += op.Value
+					DPrintf("[%v]applyLog seq[%v] append %v=%v", kv.me, seq, op.Key, op.Value)
 				}
 				kv.requestFilter[op.ClientId] = op.RequestSeq
 			}
@@ -239,21 +254,36 @@ func (kv *KVPaxos) applyLog(seq int64, op *Op) {
 	}
 
 	kv.lastApplySeq.Store(seq)
-	kv.px.Done(int(seq))
+	kv.px.Done(seq)
+	kv.px.Min()
+
+	return true
 }
 
-// 重试 seq 之前未应用日志，并等待之前的日志应用完成
-func (kv *KVPaxos) retryPaxos(seq int64) {
-	for s := int(kv.lastApplySeq.Load()) + 1; s < int(seq); s++ {
-		kv.px.Start(s, nil)
-	}
+func (kv *KVPaxos) getProposeApply(startSeq int, endSeq int) {
+	DPrintf("[%v]getProposeApply\tstart[%v]\tend[%v]\n", kv.me, startSeq, endSeq)
+	for seq := startSeq; seq < endSeq; seq++ {
+		var status paxos.Fate
+		var value interface{}
+		for i := 0; i < 3; i++ {
+			status, value = kv.px.Status(seq)
+			if status == paxos.Decided {
+				break
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
 
-	currSeq := kv.lastApplySeq.Load() + 1
-	for currSeq < seq {
-		op := kv.waitPropose(int(currSeq))
-		kv.applyLog(currSeq, op)
+		if status != paxos.Pending {
+			// 直接应用
+			value, _ := (value).(Op)
+			kv.applyLog(seq, &value)
+			continue
+		}
 
-		currSeq = kv.lastApplySeq.Load() + 1
+		// paxos 中不存在信息，需要重新启动实例
+		kv.px.Start(seq, nil)
+		op := kv.waitPropose(seq)
+		kv.applyLog(seq, op)
 	}
 }
 
@@ -299,8 +329,9 @@ func StartServer(servers []string, me int) *KVPaxos {
 
 	// Your initialization code here.
 	kv.kv = make(map[string]string)
-	kv.logMap = make(map[int64]*Op)
+	kv.logMap = make(map[int]*Op)
 	kv.requestFilter = make(map[int64]int)
+	kv.lastWaitSeq = -1
 
 	kv.lastApplySeq.Store(-1)
 	rpcs := rpc.NewServer()

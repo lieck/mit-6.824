@@ -1,6 +1,8 @@
 package kvpaxos
 
-import "net/rpc"
+import (
+	"net/rpc"
+)
 import "crypto/rand"
 import "math/big"
 
@@ -9,6 +11,9 @@ import "fmt"
 type Clerk struct {
 	servers []string
 	// You will have to modify this struct.
+	clientId      int64
+	requestSeq    int
+	nextServerIdx int
 }
 
 func nrand() int64 {
@@ -22,10 +27,11 @@ func MakeClerk(servers []string) *Clerk {
 	ck := new(Clerk)
 	ck.servers = servers
 	// You'll have to add code here.
+	ck.clientId = nrand()
+
 	return ck
 }
 
-//
 // call() sends an RPC to the rpcname handler on server srv
 // with arguments args, waits for the reply, and leaves the
 // reply in reply. the reply argument should be a pointer
@@ -41,7 +47,6 @@ func MakeClerk(servers []string) *Clerk {
 //
 // please use call() to send all RPCs, in client.go and server.go.
 // please don't change this function.
-//
 func call(srv string, rpcname string,
 	args interface{}, reply interface{}) bool {
 	c, errx := rpc.Dial("unix", srv)
@@ -59,21 +64,49 @@ func call(srv string, rpcname string,
 	return false
 }
 
-//
+func (ck *Clerk) call(name string, args interface{}, reply interface{}) {
+	for {
+		ck.nextServerIdx = (ck.nextServerIdx + 1) % len(ck.servers)
+		ok := call(ck.servers[ck.nextServerIdx], name, args, reply)
+		if !ok {
+			continue
+		}
+
+		return
+	}
+}
+
+// Get
 // fetch the current value for a key.
 // returns "" if the key does not exist.
 // keeps trying forever in the face of all other errors.
-//
 func (ck *Clerk) Get(key string) string {
 	// You will have to modify this function.
-	return ""
+	ck.requestSeq += 1
+	args := &GetArgs{
+		Key:        key,
+		ClientId:   ck.clientId,
+		RequestSeq: ck.requestSeq,
+	}
+	reply := &GetReply{}
+	ck.call("KVPaxos.Get", args, reply)
+	return reply.Value
 }
 
-//
+// PutAppend
 // shared by Put and Append.
-//
 func (ck *Clerk) PutAppend(key string, value string, op string) {
 	// You will have to modify this function.
+	ck.requestSeq += 1
+	args := &PutAppendArgs{
+		Key:        key,
+		Value:      value,
+		Op:         op,
+		ClientId:   ck.clientId,
+		RequestSeq: ck.requestSeq,
+	}
+	reply := &PutAppendReply{}
+	ck.call("KVPaxos.PutAppend", args, reply)
 }
 
 func (ck *Clerk) Put(key string, value string) {
