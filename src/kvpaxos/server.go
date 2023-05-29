@@ -53,7 +53,7 @@ type Op struct {
 }
 
 func (a *Op) Eq(b *Op) bool {
-	return a.Op == b.Op && a.Key == b.Key && a.Value == b.Value
+	return a.Op == b.Op && a.Key == b.Key && a.Value == b.Value && a.ClientId == b.ClientId && a.RequestSeq == b.RequestSeq
 }
 
 type KVPaxos struct {
@@ -78,6 +78,7 @@ func (kv *KVPaxos) Get(args *GetArgs, reply *GetReply) error {
 	// 请求过滤
 	kv.mu.Lock()
 	if clientSeq, ok := kv.requestFilter[args.ClientId]; ok && clientSeq >= args.RequestSeq {
+		DPrintf("[%v]serverGetFilter\tkey=%v\tvalue=%v\tclient=[%v:%v]", kv.me, args.Key, reply.Value, args.ClientId, args.RequestSeq)
 		if val, ok := kv.kv[args.Key]; ok {
 			reply.Value = val
 		}
@@ -101,7 +102,7 @@ func (kv *KVPaxos) Get(args *GetArgs, reply *GetReply) error {
 	if val, ok := kv.kv[args.Key]; ok {
 		reply.Value = val
 	}
-
+	DPrintf("[%v]serverGet\tkey=%v\tvalue=%v\tclient=[%v:%v]", kv.me, args.Key, reply.Value, args.ClientId, args.RequestSeq)
 	return nil
 }
 
@@ -110,6 +111,7 @@ func (kv *KVPaxos) PutAppend(args *PutAppendArgs, _ *PutAppendReply) error {
 	// 请求过滤
 	kv.mu.Lock()
 	if clientSeq, ok := kv.requestFilter[args.ClientId]; ok && clientSeq >= args.RequestSeq {
+		DPrintf("[%v]serverFilter%v\tkey=%v\tvalue=%v\tclient=[%v:%v]", kv.me, args.Op, args.Key, args.Value, args.ClientId, args.RequestSeq)
 		kv.mu.Unlock()
 		return nil
 	}
@@ -125,6 +127,7 @@ func (kv *KVPaxos) PutAppend(args *PutAppendArgs, _ *PutAppendReply) error {
 	}
 
 	kv.startPropose(op)
+	DPrintf("[%v]server%v\tkey=%v\tvalue=%v\tclient=[%v:%v]", kv.me, args.Op, args.Key, args.Value, args.ClientId, args.RequestSeq)
 	return nil
 }
 
