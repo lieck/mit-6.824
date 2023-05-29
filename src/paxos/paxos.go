@@ -46,7 +46,7 @@ const (
 	Forgotten      // decided but forgotten.
 )
 
-const Debug = 0
+const Debug = 1
 
 func DPrintf(format string, a ...interface{}) {
 	if Debug > 0 {
@@ -182,15 +182,15 @@ func (px *Paxos) proposePhase(args *ProposeArgs) (Round, *Data, Fate, bool) {
 					// 更新状态机
 					px.mu.Lock()
 
-					if reply.Status == Decided {
-						// 直接应用状态机
-						if info, ok := px.proposeMap[args.Seq]; ok {
-							if info.status == Pending {
-								info.status = Decided
-								info.accept = reply.Accept
-							}
-						}
-					}
+					//if reply.Status == Decided {
+					//	// TODO 直接应用状态机
+					//	if info, ok := px.proposeMap[args.Seq]; ok {
+					//		if info.status == Pending {
+					//			info.status = Decided
+					//			info.accept = reply.Accept
+					//		}
+					//	}
+					//}
 
 					px.maxSeq = max(px.maxSeq, reply.Commit.MaxSeq)
 					px.peerDoneSeq[id] = max(reply.Commit.DoneSeq, px.peerDoneSeq[id])
@@ -210,6 +210,7 @@ func (px *Paxos) proposePhase(args *ProposeArgs) (Round, *Data, Fate, bool) {
 		select {
 		case reply = <-ch:
 		case <-time.After(500 * time.Millisecond):
+			reply = nil
 		}
 
 		if reply == nil {

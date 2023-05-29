@@ -17,9 +17,9 @@ import "syscall"
 import "encoding/gob"
 import "math/rand"
 
-const Debug = 0
+const Debug = 1
 
-func DPrintf(format string, a ...interface{}) (n int, err error) {
+func DPrintf(format string, a ...interface{}) {
 	if Debug > 0 {
 		log.Printf(format, a...)
 	}
@@ -105,7 +105,7 @@ func (kv *KVPaxos) Get(args *GetArgs, reply *GetReply) error {
 	return nil
 }
 
-func (kv *KVPaxos) PutAppend(args *PutAppendArgs, reply *PutAppendReply) error {
+func (kv *KVPaxos) PutAppend(args *PutAppendArgs, _ *PutAppendReply) error {
 	// Your code here.
 	// 请求过滤
 	kv.mu.Lock()
@@ -230,8 +230,10 @@ func (kv *KVPaxos) applyLog(seq int, op *Op) bool {
 		} else if op.Op == Append {
 			kv.kv[op.Key] += op.Value
 			DPrintf("[%v]applyLog seq[%v] append %v=%v", kv.me, seq, op.Key, op.Value)
+		} else {
+			DPrintf("[%v]applyLog seq[%v] get %v", kv.me, seq, op.Key)
 		}
-		kv.requestFilter[op.ClientId] = op.RequestSeq
+		kv.requestFilter[op.ClientId] = max(op.RequestSeq, kv.requestFilter[op.ClientId])
 	}
 
 	// 判断后续的 log 是否可以应用
@@ -245,8 +247,10 @@ func (kv *KVPaxos) applyLog(seq int, op *Op) bool {
 				} else if op.Op == Append {
 					kv.kv[op.Key] += op.Value
 					DPrintf("[%v]applyLog seq[%v] append %v=%v", kv.me, seq, op.Key, op.Value)
+				} else {
+					DPrintf("[%v]applyLog seq[%v] get %v", kv.me, seq, op.Key)
 				}
-				kv.requestFilter[op.ClientId] = op.RequestSeq
+				kv.requestFilter[op.ClientId] = max(op.RequestSeq, kv.requestFilter[op.ClientId])
 			}
 		} else {
 			break
@@ -379,4 +383,11 @@ func StartServer(servers []string, me int) *KVPaxos {
 	}()
 
 	return kv
+}
+
+func max(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }

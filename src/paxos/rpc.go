@@ -63,11 +63,6 @@ func (px *Paxos) AcceptHandler(args *AcceptArgs, reply *AcceptReply) error {
 
 // Acceptor 请求处理函数.
 func (px *Paxos) acceptHandlerL(args *AcceptArgs, reply *AcceptReply) error {
-	if args.Seq <= px.peerDoneSeq[px.me] {
-		reply.Reject = false
-		return nil
-	}
-
 	if info, ok := px.proposeMap[args.Seq]; ok {
 		reply.Rnd = info.rnd
 		// 接受大于等于 rnd 的信息
@@ -87,7 +82,7 @@ func (px *Paxos) acceptHandlerL(args *AcceptArgs, reply *AcceptReply) error {
 		}
 	}
 
-	DPrintf("[%v]acceptHandler seq[%v]\trnd=%V\treject=%v\n", px.me, args.Seq, reply.Rnd, reply.Reject)
+	DPrintf("[%v]acceptHandler seq[%v]\trnd=%v\treject=%v\n", px.me, args.Seq, reply.Rnd, reply.Reject)
 	return nil
 }
 
@@ -95,7 +90,8 @@ func (px *Paxos) acceptHandlerL(args *AcceptArgs, reply *AcceptReply) error {
 func (px *Paxos) DecidedHandler(args *DecidedArgs, reply *DecidedReply) error {
 	px.mu.Lock()
 	defer px.mu.Unlock()
-	return px.decidedHandlerL(args, reply)
+	_ = px.decidedHandlerL(args, reply)
+	return nil
 }
 
 func (px *Paxos) decidedHandlerL(args *DecidedArgs, reply *DecidedReply) error {
@@ -103,7 +99,7 @@ func (px *Paxos) decidedHandlerL(args *DecidedArgs, reply *DecidedReply) error {
 		if data.Seq <= px.peerDoneSeq[px.me] {
 			continue
 		}
-
+		DPrintf("[%v]decided seq[%v]\taccept:%v\n", px.me, data.Seq, data)
 		info, ok := px.proposeMap[data.Seq]
 		if ok {
 			if info.status == Pending {
