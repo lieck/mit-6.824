@@ -28,10 +28,8 @@ func cleanup(sma []*ShardMaster) {
 	}
 }
 
-//
 // maybe should take a cka[] and find the server with
 // the highest Num.
-//
 func check(t *testing.T, groups []int64, ck *Clerk) {
 	c := ck.Query(-1)
 	if len(c.Groups) != len(groups) {
@@ -73,6 +71,101 @@ func check(t *testing.T, groups []int64, ck *Clerk) {
 	}
 	if max > min+1 {
 		t.Fatalf("max %v too much larger than min %v", max, min)
+	}
+}
+
+func TestConfigBalance(t *testing.T) {
+	getCnt := func(c *Config) (min int, max int) {
+		min = 1000
+		max = -1000
+
+		gcnt := make(map[int64]int)
+		for g := range c.Groups {
+			gcnt[g] = 0
+		}
+		for _, g := range c.Shards {
+			gcnt[g]++
+		}
+		if len(gcnt) != len(c.Groups) {
+			t.Fatalf("len(gcnt) != len(c.Groups)")
+		}
+
+		for _, g := range gcnt {
+			if g > max {
+				max = g
+			}
+			if g < min {
+				min = g
+			}
+		}
+
+		return min, max
+	}
+
+	check := func(c *Config) {
+		c.Balance()
+
+		gnum := len(c.Groups)
+		wantedMin := len(c.Shards) / gnum
+		wantedMax := (len(c.Shards) + gnum - 1) / gnum
+
+		if min, max := getCnt(c); min != wantedMin || max != wantedMax {
+			t.Fatalf("wanted %v, %v, got %v, %v", wantedMin, wantedMax, min, max)
+		}
+	}
+
+	delGroup := func(c *Config, gid int64) {
+		delete(c.Groups, gid)
+		for i, j := range c.Shards {
+			if j == gid {
+				c.Shards[i] = 0
+			}
+		}
+	}
+
+	{
+		//c := &Config{
+		//	Shards: [10]int64{},
+		//	Groups: make(map[int64][]string),
+		//}
+		//
+		//var i int64
+		//for i = 1; i < 10; i++ {
+		//	c.Groups[i] = nil
+		//	check(c)
+		//}
+		//
+		//for i = 1; i < 9; i++ {
+		//	delGroup(c, i)
+		//	check(c)
+		//}
+	}
+
+	{
+		c := &Config{
+			Shards: [10]int64{},
+			Groups: make(map[int64][]string),
+		}
+
+		c.Groups[10] = nil
+		c.Groups[2] = nil
+		c.Groups[1010] = nil
+		c.Groups[1004] = nil
+
+		c.Shards[0] = 10
+		c.Shards[1] = 10
+		c.Shards[2] = 1010
+		c.Shards[3] = 1010
+		c.Shards[4] = 1010
+		c.Shards[5] = 1004
+		c.Shards[6] = 1004
+		c.Shards[7] = 2
+		c.Shards[8] = 2
+		c.Shards[9] = 2
+
+		delGroup(c, 2)
+		check(c)
+
 	}
 }
 
@@ -232,6 +325,7 @@ func TestBasic(t *testing.T) {
 	for i := 0; i < npara; i++ {
 		<-ca[i]
 	}
+
 	check(t, gids, ck)
 
 	fmt.Printf("  ... Passed\n")
