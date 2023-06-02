@@ -1,6 +1,7 @@
 package kvpaxos
 
 import (
+	"mit6.824/src/config"
 	"mit6.824/src/paxos"
 	"net"
 	"time"
@@ -9,7 +10,6 @@ import "fmt"
 import "net/rpc"
 import "log"
 
-//import "paxos"
 import "sync"
 import "sync/atomic"
 import "os"
@@ -17,10 +17,8 @@ import "syscall"
 import "encoding/gob"
 import "math/rand"
 
-const Debug = 1
-
 func DPrintf(format string, a ...interface{}) {
-	if Debug > 0 {
+	if config.KVPaxosDebugLog > 0 {
 		log.Printf(format, a...)
 	}
 	return

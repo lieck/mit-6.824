@@ -1,6 +1,6 @@
 package shardkv
 
-import "shardmaster"
+import "mit6.824/src/shardmaster"
 import "net/rpc"
 import "time"
 import "sync"
@@ -13,6 +13,8 @@ type Clerk struct {
 	sm     *shardmaster.Clerk
 	config shardmaster.Config
 	// You'll have to modify Clerk.
+	clientId   int64
+	requestSeq int
 }
 
 func nrand() int64 {
@@ -26,10 +28,11 @@ func MakeClerk(shardmasters []string) *Clerk {
 	ck := new(Clerk)
 	ck.sm = shardmaster.MakeClerk(shardmasters)
 	// You'll have to modify MakeClerk.
+	ck.clientId = nrand()
+
 	return ck
 }
 
-//
 // call() sends an RPC to the rpcname handler on server srv
 // with arguments args, waits for the reply, and leaves the
 // reply in reply. the reply argument should be a pointer
@@ -45,7 +48,6 @@ func MakeClerk(shardmasters []string) *Clerk {
 //
 // please use call() to send all RPCs, in client.go and server.go.
 // please don't change this function.
-//
 func call(srv string, rpcname string,
 	args interface{}, reply interface{}) bool {
 	c, errx := rpc.Dial("unix", srv)
@@ -63,11 +65,9 @@ func call(srv string, rpcname string,
 	return false
 }
 
-//
 // which shard is a key in?
 // please use this function,
 // and please do not change it.
-//
 func key2shard(key string) int {
 	shard := 0
 	if len(key) > 0 {
@@ -77,16 +77,15 @@ func key2shard(key string) int {
 	return shard
 }
 
-//
-// fetch the current value for a key.
+// Get fetch the current value for a key.
 // returns "" if the key does not exist.
 // keeps trying forever in the face of all other errors.
-//
 func (ck *Clerk) Get(key string) string {
 	ck.mu.Lock()
 	defer ck.mu.Unlock()
 
 	// You'll have to modify Get().
+	ck.requestSeq++
 
 	for {
 		shard := key2shard(key)
@@ -98,15 +97,29 @@ func (ck *Clerk) Get(key string) string {
 		if ok {
 			// try each server in the shard's replication group.
 			for _, srv := range servers {
-				args := &GetArgs{}
-				args.Key = key
+				args := &GetArgs{
+					Key:        key,
+					ClientId:   ck.clientId,
+					RequestSeq: ck.requestSeq,
+					ShardId:    shard,
+					ConfigId:   ck.config.Num,
+				}
+
 				var reply GetReply
 				ok := call(srv, "ShardKV.Get", args, &reply)
-				if ok && (reply.Err == OK || reply.Err == ErrNoKey) {
-					return reply.Value
-				}
-				if ok && (reply.Err == ErrWrongGroup) {
-					break
+				if ok {
+					switch reply.Err {
+					case ErrNoKey:
+						return ""
+					case OK:
+						return reply.Value
+					case ErrWrongGroup:
+						if reply.ConfigNum < ck.config.Num {
+							time.Sleep(100 * time.Millisecond)
+							continue
+						}
+						break
+					}
 				}
 			}
 		}
@@ -118,34 +131,45 @@ func (ck *Clerk) Get(key string) string {
 	}
 }
 
-// send a Put or Append request.
+// PutAppend send a Put or Append request.
 func (ck *Clerk) PutAppend(key string, value string, op string) {
 	ck.mu.Lock()
 	defer ck.mu.Unlock()
 
 	// You'll have to modify PutAppend().
+	ck.requestSeq++
 
 	for {
 		shard := key2shard(key)
-
 		gid := ck.config.Shards[shard]
-
 		servers, ok := ck.config.Groups[gid]
 
 		if ok {
 			// try each server in the shard's replication group.
 			for _, srv := range servers {
-				args := &PutAppendArgs{}
-				args.Key = key
-				args.Value = value
-				args.Op = op
+				args := &PutAppendArgs{
+					Key:        key,
+					Value:      value,
+					Op:         op,
+					ClientId:   ck.clientId,
+					RequestSeq: ck.requestSeq,
+					ShardId:    shard,
+					ConfigId:   ck.config.Num,
+				}
+
 				var reply PutAppendReply
 				ok := call(srv, "ShardKV.PutAppend", args, &reply)
-				if ok && reply.Err == OK {
-					return
-				}
-				if ok && (reply.Err == ErrWrongGroup) {
-					break
+				if ok {
+					switch reply.Err {
+					case OK:
+						return
+					case ErrWrongGroup:
+						if reply.ConfigNum < ck.config.Num {
+							time.Sleep(300 * time.Millisecond)
+							continue
+						}
+						break
+					}
 				}
 			}
 		}

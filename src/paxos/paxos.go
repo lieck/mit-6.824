@@ -22,6 +22,7 @@ package paxos
 
 import (
 	"log"
+	"mit6.824/src/config"
 	"net"
 	"time"
 )
@@ -46,10 +47,8 @@ const (
 	Forgotten      // decided but forgotten.
 )
 
-const Debug = 1
-
 func DPrintf(format string, a ...interface{}) {
-	if Debug > 0 {
+	if config.PaxosDebugLog > 0 {
 		log.Printf(format, a...)
 	}
 	return

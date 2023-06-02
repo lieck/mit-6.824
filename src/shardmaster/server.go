@@ -248,7 +248,7 @@ func (sm *ShardMaster) applyConfig(seq int, op *Op) bool {
 	sm.lastApplySeq.Store(seq)
 
 	if op.Configs == nil {
-		DPrintf("[%v]applyConfig\tseq[%v]op=%v\n", sm.me, seq, op)
+		DPrintf("[%v]applyConfig\tseq[%v]\top=%v\n", sm.me, seq, op)
 		return false
 	}
 
@@ -345,7 +345,7 @@ func (sm *ShardMaster) getNewestConfig() {
 		replyOp := sm.waitDecided(seq, false)
 		sm.applyConfig(seq, replyOp)
 
-		if replyOp.Eq(&op) {
+		if replyOp != nil && replyOp.Eq(&op) {
 			break
 		}
 	}
