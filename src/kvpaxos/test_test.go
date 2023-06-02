@@ -365,8 +365,8 @@ func TestUnreliable(t *testing.T) {
 	runtime.GOMAXPROCS(4)
 
 	const nservers = 3
-	var kva []*KVPaxos = make([]*KVPaxos, nservers)
-	var kvh []string = make([]string, nservers)
+	var kva = make([]*KVPaxos, nservers)
+	var kvh = make([]string, nservers)
 	defer cleanup(kva)
 
 	for i := 0; i < nservers; i++ {
@@ -523,12 +523,12 @@ func TestHole(t *testing.T) {
 
 	tag := "hole"
 	const nservers = 5
-	var kva []*KVPaxos = make([]*KVPaxos, nservers)
+	var kva = make([]*KVPaxos, nservers)
 	defer cleanup(kva)
 	defer cleanpp(tag, nservers)
 
 	for i := 0; i < nservers; i++ {
-		var kvh []string = make([]string, nservers)
+		var kvh = make([]string, nservers)
 		for j := 0; j < nservers; j++ {
 			if j == i {
 				kvh[j] = port(tag, i)

@@ -13,7 +13,7 @@ type Clerk struct {
 	// You will have to modify this struct.
 	clientId      int64
 	requestSeq    int
-	nextServerIdx int
+	nextServerIdx uint32
 }
 
 func nrand() int64 {
@@ -66,7 +66,7 @@ func call(srv string, rpcname string,
 
 func (ck *Clerk) call(name string, args interface{}, reply interface{}) {
 	for {
-		ck.nextServerIdx = (ck.nextServerIdx + 1) % len(ck.servers)
+		ck.nextServerIdx = (ck.nextServerIdx + 1) % uint32(len(ck.servers))
 		ok := call(ck.servers[ck.nextServerIdx], name, args, reply)
 		if !ok {
 			continue

@@ -22,7 +22,7 @@ func (px *Paxos) proposeHandlerL(args *ProposeArgs, reply *ProposeReply) error {
 			reply.Accept = info.accept
 		}
 
-		// TODO 优化：值已经选定，直接返回，通知 proposer 不进行后续的处理
+		// TODO：优化，值已经选定，直接返回，通知 proposer 不进行后续的处理
 		//if info.status == Decided {
 		//	reply.Status = Decided
 		//	return nil

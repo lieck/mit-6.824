@@ -328,6 +328,7 @@ func (px *Paxos) commitPhase(args *DecidedArgs) {
 		reply := &DecidedReply{}
 		if id == px.me {
 			_ = px.decidedHandlerL(args, reply)
+			continue
 		}
 		go func(id int, peer string) {
 			ok := call(peer, "Paxos.DecidedHandler", args, reply)
